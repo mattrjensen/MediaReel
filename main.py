@@ -41,11 +41,9 @@ ROW_H   = COMPACT_ROW_H
 
 # ── Colour palette ───────────────────────────────────────────────────────────
 # Preview column text colours:
-#   Blue  — will rename using own trusted date (strong anchor, not moved)
-#   Amber — will rename using a derived/approximated date (any moved file)
+#   Amber — will be renamed (any file getting a new name)
 #   Grey  — no rename will happen (hard anchor, or unmoved weak anchor)
-CLR_WILL_RENAME  = QColor('#2563EB')   # blue
-CLR_DERIVED      = QColor('#D97706')   # amber — re-anchored or interpolated
+CLR_DERIVED      = QColor('#D97706')   # amber
 CLR_NO_CHANGE    = QColor('#9CA3AF')   # grey
 CLR_ATTENTION_BG = QColor('#FEF3C7')
 
@@ -89,12 +87,10 @@ class PreviewDelegate(BaseDelegate):
         if f.needs_attention:
             painter.fillRect(option.rect, CLR_ATTENTION_BG)
 
-        if f.needs_attention or f.proposed_filename == f.filename:
+        if f.proposed_filename == f.filename:
             colour = CLR_NO_CHANGE
-        elif f.is_interpolated or f.is_re_anchored:
-            colour = CLR_DERIVED
         else:
-            colour = CLR_WILL_RENAME
+            colour = CLR_DERIVED
 
         painter.setPen(colour)
         rect = option.rect.adjusted(8, 0, -8, 0)

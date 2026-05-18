@@ -1,7 +1,13 @@
 # Media Reel — Project Spec & Design Decisions
 
 ## What this app is
-Media Reel is a Windows desktop app (Python + PySide6) for collating photos and videos from multiple people taken at the same event into a single chronological sequence. It does this by renaming files with a prepended `YYYYMMDD_HHMMSS_` timestamp, making the filename the permanent, unchangeable source of chronological truth — so that even if a file is edited, cropped, or colour-corrected, it still sorts correctly.
+Media Reel is a desktop app (Python + PySide6) (currently just Windows) for assembling photos and videos from multiple people and devices into a single chronological sequence — telling the visual story of a shared experience.
+
+The app works by renaming files with a prepended `YYYYMMDD_HHMMSS_` timestamp, making the filename the permanent, self-describing source of chronological truth — independent of any photo app, operating system, or platform. Even if a file is edited, cropped, or colour-corrected, it still sorts correctly forever.
+
+The primary use case is post-event curation: once files are in order, you can compare competing captures of the same moment side by side and choose the best photo or video of each. The chronological sequence turns an ambiguous pile of files into a navigable story, ready to be culled into the best photographic memory of the event.
+
+The app is intentionally single-session and non-destructive — no files are touched on disk until the user explicitly applies changes.
 
 ## Tech stack
 - Python 3.14
@@ -242,10 +248,9 @@ Implementation: in `MainWindow._apply_rename()`, replace the two separate
 | Colour | Meaning |
 |---|---|
 | Grey | No change will happen (hard anchor, or unmoved weak anchor) |
-| Blue | Will be renamed using own trusted date (strong anchor, not moved) |
-| Amber | Will be renamed using a derived/approximated date (any moved file — re-anchored or interpolated) |
+| Amber | Will be renamed — any file getting a new name, regardless of how the date was derived (own date, re-anchored, or interpolated) |
 
-The distinction between re-anchored and interpolated does not need separate colours — both result in an approximated timestamp and both warrant the same amber treatment.
+One colour for all renames — amber means "this file will be renamed." No colour key needed. Grey means no change, amber means change. The mechanism (own date vs derived date) is visible in the Date taken badge for users who want the detail.
 
 ### Date taken column — source badge
 
@@ -276,7 +281,7 @@ The amber `needs_attention` highlight is applied only to the **New filename (pre
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
 | 3 | Date taken | Source badge (top) + formatted datetime (below) |
-| 4 | New filename (preview) | Grey = no change. Blue = own date rename. Amber = derived date rename. |
+| 4 | New filename (preview) | Grey = no change. Amber = will be renamed. |
 | 5 | Preview | Thumbnail. Videos show first frame + duration badge. |
 | 6 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
 
