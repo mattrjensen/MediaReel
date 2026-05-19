@@ -218,26 +218,24 @@ After the resort and recalculate, scroll the table back to the top via
 from the beginning of the list.
 
 ### Apply rename confirmation dialog
-The confirmation dialog is a single prompt combining all relevant information.
-No separate "files need attention" pre-prompt — everything in one dialog.
+The confirmation dialog is phase-aware — single prompt, no separate pre-prompt.
 
-Format:
-Make sure you have a backup first.
-{n} file(s) will be renamed.
-{x} file(s) have no date info and will be skipped.
+**Phase 1** (`has_pending_strong_renames() == True`):
+{n} file(s) will be renamed to start with the date and time they were taken.
+
+Make sure you have a backup.
+
 Continue?
 
-If there are no files being skipped, omit the skipped line entirely:
-Make sure you have a backup first.
+**Phase 2** (`has_pending_strong_renames() == False`):
 {n} file(s) will be renamed.
+
+Make sure you have a backup.
+
 Continue?
 
-If there are no files to rename at all, the Apply button should be disabled
-so this dialog is never reached.
-
-Implementation: in `MainWindow._apply_rename()`, replace the two separate
-`QMessageBox` calls with a single combined message built from
-`model.has_pending_renames()` count and `model.attention_count()`.
+Implementation: in `MainWindow._apply_rename()`, use `has_pending_strong_renames()`
+to determine which dialog text to show. Single `QMessageBox` call in both cases.
 
 ---
 
@@ -247,10 +245,11 @@ Implementation: in `MainWindow._apply_rename()`, replace the two separate
 
 | Colour | Meaning |
 |---|---|
-| Grey | No change will happen (hard anchor, or unmoved weak anchor) |
-| Amber | Will be renamed — any file getting a new name, regardless of how the date was derived (own date, re-anchored, or interpolated) |
+| Grey | No change will happen, or placeholder instruction text |
+| Amber | Will be renamed — any file getting a new name (own date, re-anchored, or interpolated) |
 
-One colour for all renames — amber means "this file will be renamed." No colour key needed. Grey means no change, amber means change. The mechanism (own date vs derived date) is visible in the Date taken badge for users who want the detail.
+Placeholder instruction text (starting with `'---'`) is always grey — it is a
+status instruction, not a proposed rename.
 
 ### Date taken column — source badge
 
@@ -258,18 +257,78 @@ One colour for all renames — amber means "this file will be renamed." No colou
 |---|---|---|
 | `metadata` | Green | Date from EXIF/video metadata — most trusted |
 | `filename` | Grey | Date parsed from filename string |
-| `date modified` | Amber | OS modification timestamp — unreliable, treat as weak |
+| `date modified` | Grey (Phase 1) / Amber (Phase 2) | OS modification timestamp — unreliable, treat as weak |
 | `interpolated` | Orange | Date derived from neighbours |
-| `none` | Red | No date found |
+| `none` | Grey (Phase 1) / Red (Phase 2) | No date found |
+
+In Phase 1, weak file badges (`date modified`, `none`) are grey to reinforce
+that these files are not yet actionable.
 
 ### Row background
 
-| Background | Meaning |
-|---|---|
-| White / faint grey alternating | Normal |
-| Blue tint | Selected |
+| Phase | Row type | Background |
+|---|---|---|
+| Both | Hard anchor | White / faint grey alternating (normal) |
+| Both | Selected | 1px blue border (`#2563EB`) around row — background colour unchanged |
+| Phase 1 | Strong anchor | Light amber (`#FEF3C7`) / very light amber (`#FFFBEB`) alternating |
+| Phase 1 | Weak anchor | Slightly greyed out (`#F3F4F6`) / (`#EEEEEE`) alternating |
+| Phase 2 | Weak anchor (moved or not) | Light amber (`#FEF3C7`) / very light amber (`#FFFBEB`) alternating |
+| Phase 2 | Hard anchor | White / faint grey alternating (normal) |
 
-The amber `needs_attention` highlight is applied only to the **New filename (preview)** cell, not the full row.
+Amber row = "this file needs your attention / will be renamed."
+Grey row in Phase 1 = "not actionable yet."
+
+---
+
+## Phase 1 / Phase 2 state
+
+The app has two operational phases driven by `has_pending_strong_renames()`.
+
+### has_pending_strong_renames()
+
+```python
+def has_pending_strong_renames(self) -> bool:
+    return any(
+        not f.is_already_formatted
+        and f.date_source in ('metadata', 'filename')
+        and not f.user_moved
+        for f in self._files
+    )
+```
+
+Returns `True` while any strong anchor files remain unrennamed. Drives all
+Phase 1 vs Phase 2 UI state. Called after every `apply_rename()` and after
+`recalculate_proposed_filenames()`.
+
+### Phase 1 — strong anchors pending
+
+Condition: `has_pending_strong_renames() == True`
+
+- **Move up / Move down buttons** — disabled
+- **Tooltip on Move buttons** — `"Rename files with proposed new filenames first — click Apply rename"`
+- **Status message** — `"Rename the {n} highlighted file(s) first — click Apply rename to apply their automatically assigned new filenames"`
+- **Strong anchor rows** — light amber / very light amber alternating background
+- **Weak anchor rows** — greyed out background; all row text grey; `date modified` and `none` badges grey
+- **Weak anchor placeholder text** — `'--- Click \'Apply rename\' once you have reviewed the proposed new filename(s) for the highlighted files ---'`
+- **Apply rename** — enabled; only renames strong anchors (weak files have no proposed rename in Phase 1). Confirmation dialog shows Phase 1 text.
+- **N files need attention button** — visible when any strong anchors have pending renames. Label: `"⚠ {n} file(s) need renaming"`. Clicking jumps to first strong anchor with `is_already_formatted=False`, `date_source in ('metadata', 'filename')`, and `user_moved=False`.
+
+### Phase 2 — all strong anchors renamed
+
+Condition: `has_pending_strong_renames() == False`
+
+- **Move up / Move down buttons** — enabled (subject to selection)
+- **Tooltip on Move buttons** — none
+- **Status message** — standard status (selected count, rename count, flagged count)
+- **Weak anchor rows** — light amber / very light amber alternating (all weak files, moved or not)
+- **Weak anchor, not moved** — grey placeholder: `'--- Nudge into position ---'`
+- **Weak anchor, moved** — amber proposed filename text
+- **N files need attention button** — visible when any weak files have `needs_attention=True`. Label: `"⚠ {n} file(s) need positioning"`. Clicking jumps to first weak anchor with `needs_attention=True`.- **Apply rename** — renames moved weak files only. Confirmation dialog shows Phase 2 text.
+
+### Transition
+
+Happens automatically after `apply_rename()` completes and resort/recalculate
+runs. No user action needed beyond clicking Apply rename.
 
 ---
 
@@ -281,7 +340,7 @@ The amber `needs_attention` highlight is applied only to the **New filename (pre
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
 | 3 | Date taken | Source badge (top) + formatted datetime (below) |
-| 4 | New filename (preview) | Grey = no change. Amber = will be renamed. |
+| 4 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. |
 | 5 | Preview | Thumbnail. Videos show first frame + duration badge. |
 | 6 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
 
@@ -362,6 +421,19 @@ the right interaction in expanded mode.
 - One `MetadataWorker` (QRunnable) per file, each owns its own `WorkerSignals` instance
 - `QImage` created on worker thread, converted to `QPixmap` on main thread in `_on_thumb_ready`
 - `folder_load_complete` emitted only after all workers finish
+
+### Dialog styling
+All `QMessageBox` dialogs are styled globally via `app.setStyleSheet()` in
+`main()` to match the app's visual language — white background, clean
+typography, rounded corners, blue primary button (Yes/OK), grey secondary
+button (No/Cancel). No separate styling needed per dialog. Consistent with
+the toolbar button styles defined in `_btn_style()` and `_btn_style_primary()`.
+
+Key styles applied:
+- `QMessageBox` — white background, `font-size: 13px`, `color: #111827`
+- `QMessageBox QLabel` — `padding: 8px`
+- `QMessageBox QPushButton` — rounded, grey border, white background
+- `QMessageBox QPushButton[text="Yes"/"OK"]` — blue (`#2563EB`), white text, bold
 
 ---
 

@@ -11,7 +11,7 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QThreadPool,
     QRunnable, Qt, Signal, QObject, QCoreApplication
 )
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtGui import QColor, QPixmap, QImage
 
 from metadata_reader import (
     read_metadata, build_new_filename,
@@ -44,6 +44,9 @@ DateSourceRole     = Qt.UserRole + 2
 IsInterpolatedRole = Qt.UserRole + 3
 IsReAnchoredRole   = Qt.UserRole + 4
 NeedsAttentionRole = Qt.UserRole + 5
+
+_PLACEHOLDER_PHASE1 = ("--- Rename highlighted files before you move this file ---")
+_PLACEHOLDER_PHASE2 = '--- Move file into chronological order ---'
 
 
 # ── MediaFile dataclass ─────────────────────────────────────────────────────
@@ -321,6 +324,7 @@ class MediaTableModel(QAbstractTableModel):
     attention_required   = Signal(int)      # emits count of flagged files
     rename_progress      = Signal(int, int) # done, total
     rename_complete      = Signal(int, int) # success_count, error_count
+    phase_changed        = Signal(bool)     # True = Phase 1, False = Phase 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -328,6 +332,7 @@ class MediaTableModel(QAbstractTableModel):
         self._pool  = QThreadPool.globalInstance()
         self._pending_workers = 0
         self._total_workers   = 0
+        self._is_phase1 = False
 
     # ── Qt model interface ───────────────────────────────────────────────────
 
@@ -368,6 +373,18 @@ class MediaTableModel(QAbstractTableModel):
 
         if role == Qt.DecorationRole and col == COL_THUMB:
             return f.thumbnail
+
+        if role == Qt.BackgroundRole:
+            if f.is_already_formatted:
+                return QColor('#FAFAFA' if row % 2 else '#FFFFFF')
+            is_weak = f.date_source in (DATE_SOURCE_MODIFIED, DATE_SOURCE_NONE)
+            alt = bool(row % 2)
+            if self._is_phase1:
+                return (QColor('#EEEEEE' if alt else '#F3F4F6') if is_weak
+                        else QColor('#FFFBEB' if alt else '#FEF3C7'))
+            else:
+                return (QColor('#FFFBEB' if alt else '#FEF3C7') if is_weak
+                        else QColor('#FAFAFA' if alt else '#FFFFFF'))
 
         # Custom roles used by delegates
         if role == MediaFileRole:      return f
@@ -489,10 +506,13 @@ class MediaTableModel(QAbstractTableModel):
           2. Group interpolation for runs of undated files
           3. Collision resolution
         """
-        files = self._files
-        n     = len(files)
+        files       = self._files
+        n           = len(files)
         if n == 0:
             return
+        placeholder = (_PLACEHOLDER_PHASE1
+                       if self.has_pending_strong_renames()
+                       else _PLACEHOLDER_PHASE2)
 
         # Reset effective_date so anchor lookups during this pass only see
         # values set in this pass (forward neighbours fall back to f.date).
@@ -557,7 +577,7 @@ class MediaTableModel(QAbstractTableModel):
                     f.is_interpolated = True  # resolved in Pass 2
                 else:
                     f.needs_attention   = True
-                    f.proposed_filename = '— nudge into position →'
+                    f.proposed_filename = placeholder
 
         # ── Pass 2: group interpolation ──────────────────────────────────────
         # Only processes is_interpolated=True files (moved weak/strong files).
@@ -600,7 +620,7 @@ class MediaTableModel(QAbstractTableModel):
                     else:
                         rf.needs_attention   = True
                         rf.is_interpolated   = False
-                        rf.proposed_filename = '— nudge into position →'
+                        rf.proposed_filename = placeholder
                         continue
 
                     rf.proposed_filename = build_new_filename(
@@ -613,7 +633,7 @@ class MediaTableModel(QAbstractTableModel):
         seen: dict = {}
         for f in files:
             name = f.proposed_filename
-            if name in ('— nudge into position →', f.filename):
+            if name.startswith('---') or name == f.filename:
                 continue
             seen.setdefault(name, []).append(f)
 
@@ -634,6 +654,8 @@ class MediaTableModel(QAbstractTableModel):
 
         attention_count = sum(1 for f in files if f.needs_attention)
         self.attention_required.emit(attention_count)
+        self._is_phase1 = self.has_pending_strong_renames()
+        self.phase_changed.emit(self._is_phase1)
 
     def apply_rename(self):
         """
@@ -646,8 +668,9 @@ class MediaTableModel(QAbstractTableModel):
         errors  = 0
 
         pending = [f for f in self._files
-                   if f.proposed_filename not in
-                   (f.filename, '— nudge into position →', '')]
+                   if f.proposed_filename != f.filename
+                   and not f.proposed_filename.startswith('---')
+                   and f.proposed_filename != '']
         total = len(pending)
 
         for done, f in enumerate(pending, 1):
@@ -696,6 +719,8 @@ class MediaTableModel(QAbstractTableModel):
             br = self.index(len(self._files) - 1, COLUMN_COUNT - 1)
             self.dataChanged.emit(tl, br)
 
+        self._is_phase1 = self.has_pending_strong_renames()
+        self.phase_changed.emit(self._is_phase1)
         self.rename_complete.emit(success, errors)
 
     def _write_metadata_date(self, filepath: str, f: MediaFile,
@@ -724,7 +749,15 @@ class MediaTableModel(QAbstractTableModel):
     def has_pending_renames(self) -> bool:
         return any(
             f.proposed_filename != f.filename and
-            f.proposed_filename not in ('— nudge into position →', '')
+            not f.proposed_filename.startswith('---') and f.proposed_filename != ''
+            for f in self._files
+        )
+
+    def has_pending_strong_renames(self) -> bool:
+        return any(
+            not f.is_already_formatted
+            and f.date_source in ('metadata', 'filename')
+            and not f.user_moved
             for f in self._files
         )
 

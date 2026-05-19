@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (
-    Qt, QSize, QEvent, QTimer, QRectF, QStandardPaths, Signal
+    Qt, QSize, QRect, QEvent, QTimer, QRectF, QStandardPaths, Signal
 )
 from PySide6.QtGui import (
     QColor, QPainter, QPen, QPixmap, QImage, QPalette
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QToolBar, QTableView, QAbstractItemView,
     QHeaderView, QLabel, QStatusBar, QPushButton,
     QFileDialog, QMessageBox, QProgressDialog, QStyledItemDelegate,
-    QStyleOptionViewItem, QProgressBar, QStyle,
+    QStyleOptionViewItem, QStyleOptionButton, QProgressBar, QStyle,
     QSizePolicy
 )
 
@@ -43,9 +43,8 @@ ROW_H   = COMPACT_ROW_H
 # Preview column text colours:
 #   Amber — will be renamed (any file getting a new name)
 #   Grey  — no rename will happen (hard anchor, or unmoved weak anchor)
-CLR_DERIVED      = QColor('#D97706')   # amber
-CLR_NO_CHANGE    = QColor('#9CA3AF')   # grey
-CLR_ATTENTION_BG = QColor('#FEF3C7')
+CLR_DERIVED   = QColor('#D97706')   # amber
+CLR_NO_CHANGE = QColor('#9CA3AF')   # grey
 
 SOURCE_BADGE = {
     'metadata':      ('#D1FAE5', '#065F46'),
@@ -59,14 +58,27 @@ SOURCE_BADGE = {
 # ── Base delegate ─────────────────────────────────────────────────────────────
 class BaseDelegate(QStyledItemDelegate):
 
+    _is_phase1: bool = False
+
+    def set_phase1(self, is_phase1: bool):
+        self._is_phase1 = is_phase1
+
     def _draw_bg(self, painter: QPainter, option, f: MediaFile = None):
-        selected = bool(option.state & QStyle.State_Selected)
-        if selected:
-            painter.fillRect(option.rect, QColor('#EFF6FF'))
-        elif option.features & QStyleOptionViewItem.Alternate:
-            painter.fillRect(option.rect, QColor('#FAFAFA'))
+        alt = bool(option.features & QStyleOptionViewItem.Alternate)
+        if f is None or f.is_already_formatted:
+            painter.fillRect(option.rect, QColor('#FAFAFA' if alt else '#FFFFFF'))
+            return
+        is_weak = f.date_source in ('date modified', 'none')
+        if self._is_phase1:
+            if is_weak:
+                painter.fillRect(option.rect, QColor('#EEEEEE' if alt else '#F3F4F6'))
+            else:
+                painter.fillRect(option.rect, QColor('#FFFBEB' if alt else '#FEF3C7'))
         else:
-            painter.fillRect(option.rect, QColor('#FFFFFF'))
+            if is_weak:
+                painter.fillRect(option.rect, QColor('#FFFBEB' if alt else '#FEF3C7'))
+            else:
+                painter.fillRect(option.rect, QColor('#FAFAFA' if alt else '#FFFFFF'))
 
     def sizeHint(self, option, index):
         return QSize(super().sizeHint(option, index).width(), ROW_H)
@@ -84,10 +96,7 @@ class PreviewDelegate(BaseDelegate):
         painter.save()
         self._draw_bg(painter, option, f)
 
-        if f.needs_attention:
-            painter.fillRect(option.rect, CLR_ATTENTION_BG)
-
-        if f.proposed_filename == f.filename:
+        if f.proposed_filename == f.filename or f.proposed_filename.startswith('---'):
             colour = CLR_NO_CHANGE
         else:
             colour = CLR_DERIVED
@@ -117,7 +126,10 @@ class DateDelegate(BaseDelegate):
         source = ('interpolated'
                   if (f.is_interpolated or f.is_re_anchored)
                   else f.date_source)
-        bg_hex, fg_hex = SOURCE_BADGE.get(source, SOURCE_BADGE['none'])
+        if self._is_phase1 and source in ('date modified', 'none'):
+            bg_hex, fg_hex = '#E5E7EB', '#6B7280'
+        else:
+            bg_hex, fg_hex = SOURCE_BADGE.get(source, SOURCE_BADGE['none'])
 
         small = painter.font()
         small.setPointSize(max(7, small.pointSize() - 2))
@@ -285,6 +297,43 @@ class MoveDelegate(BaseDelegate):
         return False
 
 
+# ── Row background delegates (checkbox / order / filename columns) ────────────
+# These columns have no other custom rendering, but need the same phase-aware
+# background as the other columns so the full row is highlighted consistently.
+
+class _CheckDelegate(BaseDelegate):
+
+    def paint(self, painter: QPainter, option, index):
+        f: MediaFile = index.data(MediaFileRole)
+        painter.save()
+        self._draw_bg(painter, option, f)
+        checked = (index.data(Qt.CheckStateRole) == Qt.Checked)
+        size = 14
+        r = option.rect
+        cb = QRect(r.x() + (r.width()  - size) // 2,
+                   r.y() + (r.height() - size) // 2,
+                   size, size)
+        opt = QStyleOptionButton()
+        opt.rect  = cb
+        opt.state = (QStyle.State_Enabled |
+                     (QStyle.State_On if checked else QStyle.State_Off))
+        QApplication.style().drawPrimitive(QStyle.PE_IndicatorCheckBox, opt, painter)
+        painter.restore()
+
+
+class _RowTextDelegate(BaseDelegate):
+
+    def paint(self, painter: QPainter, option, index):
+        f: MediaFile = index.data(MediaFileRole)
+        painter.save()
+        self._draw_bg(painter, option, f)
+        text = index.data(Qt.DisplayRole) or ''
+        painter.setPen(QColor('#111827'))
+        painter.drawText(option.rect.adjusted(8, 0, -8, 0),
+                         Qt.AlignVCenter | Qt.AlignLeft, text)
+        painter.restore()
+
+
 # ── Loading overlay ───────────────────────────────────────────────────────────
 class LoadingOverlay(QWidget):
     """
@@ -387,6 +436,36 @@ class LoadingOverlay(QWidget):
         painter.end()
 
 
+# ── Table view with row-border selection ─────────────────────────────────────
+class MediaTableView(QTableView):
+    """QTableView that draws a 1px blue border around each selected row instead
+    of flooding the row with a highlight fill."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        sel = self.selectionModel()
+        if not sel:
+            return
+        rows = {idx.row() for idx in sel.selectedIndexes()}
+        if not rows:
+            return
+        model = self.model()
+        if not model:
+            return
+        last_col = model.columnCount() - 1
+        painter = QPainter(self.viewport())
+        pen = QPen(QColor('#2563EB'), 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        for row in sorted(rows):
+            left  = self.visualRect(model.index(row, 0))
+            right = self.visualRect(model.index(row, last_col))
+            row_rect = left.united(right).adjusted(0, 0, -1, -1)
+            painter.drawRect(row_rect)
+        painter.end()
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
@@ -396,6 +475,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 600)
         self.resize(1280, 800)
         self._model        = MediaTableModel()
+        self._is_phase1    = False
         self._expanded     = False
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._on_repeat_tick)
@@ -482,7 +562,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._progress)
 
         # ── Table ─────────────────────────────────────────────────────────────
-        self._table = QTableView()
+        self._table = MediaTableView()
         self._table.setModel(self._model)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -498,10 +578,6 @@ class MainWindow(QMainWindow):
             QTableView::item {
                 border-bottom: 1px solid #F3F4F6;
                 color: #111827;
-            }
-            QTableView::item:selected {
-                background: #EFF6FF;
-                color: #1E3A8A;
             }
             QHeaderView::section {
                 background: #F9FAFB;
@@ -537,10 +613,18 @@ class MainWindow(QMainWindow):
 
         self._table.verticalHeader().setDefaultSectionSize(ROW_H)
 
-        self._move_delegate  = MoveDelegate(self)
-        self._thumb_delegate = ThumbnailDelegate(self)
-        self._table.setItemDelegateForColumn(COL_DATE,    DateDelegate(self))
-        self._table.setItemDelegateForColumn(COL_PREVIEW, PreviewDelegate(self))
+        self._move_delegate     = MoveDelegate(self)
+        self._thumb_delegate    = ThumbnailDelegate(self)
+        self._date_delegate     = DateDelegate(self)
+        self._preview_delegate  = PreviewDelegate(self)
+        self._check_delegate    = _CheckDelegate(self)
+        self._order_delegate    = _RowTextDelegate(self)
+        self._filename_delegate = _RowTextDelegate(self)
+        self._table.setItemDelegateForColumn(COL_CHECK,   self._check_delegate)
+        self._table.setItemDelegateForColumn(COL_ORDER,   self._order_delegate)
+        self._table.setItemDelegateForColumn(COL_FILENAME, self._filename_delegate)
+        self._table.setItemDelegateForColumn(COL_DATE,    self._date_delegate)
+        self._table.setItemDelegateForColumn(COL_PREVIEW, self._preview_delegate)
         self._table.setItemDelegateForColumn(COL_THUMB,   self._thumb_delegate)
         self._table.setItemDelegateForColumn(COL_MOVE,    self._move_delegate)
 
@@ -583,6 +667,7 @@ class MainWindow(QMainWindow):
         self._model.file_progress.connect(self._overlay.set_progress)
         self._model.attention_required.connect(self._on_attention_required)
         self._model.rename_complete.connect(self._on_rename_complete)
+        self._model.phase_changed.connect(self._on_phase_changed)
         self._model.dataChanged.connect(self._refresh_status)
         self._model.layoutChanged.connect(self._refresh_status)
 
@@ -668,14 +753,17 @@ class MainWindow(QMainWindow):
     def _apply_rename(self):
         pending = sum(
             1 for f in self._model.files()
-            if f.proposed_filename not in (f.filename, '— nudge into position →', ''))
-        attention = self._model.attention_count()
-
-        msg = 'Make sure you have a backup first.\n'
-        msg += f'{pending} file(s) will be renamed.'
-        if attention > 0:
-            msg += f'\n{attention} file(s) have no date info and will be skipped.'
-        msg += '\n\nContinue?'
+            if f.proposed_filename != f.filename
+            and not f.proposed_filename.startswith('---')
+            and f.proposed_filename != ''
+        )
+        if self._model.has_pending_strong_renames():
+            msg = (f'{pending} file(s) will be renamed with the date '
+                   f'and time they were taken.\n\n'
+                   f'Make sure you have a backup.\n\nContinue?')
+        else:
+            msg = (f'{pending} file(s) will be renamed.\n\n'
+                   f'Make sure you have a backup.\n\nContinue?')
 
         reply = QMessageBox.question(
             self, 'Apply rename', msg,
@@ -699,12 +787,22 @@ class MainWindow(QMainWindow):
         dlg.close()
 
     def _jump_to_attention(self):
-        for i, f in enumerate(self._model.files()):
-            if f.needs_attention:
-                idx = self._model.index(i, COL_FILENAME)
-                self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
-                self._table.setCurrentIndex(idx)
-                break
+        files = self._model.files()
+        if self._is_phase1:
+            target = next(
+                (i for i, f in enumerate(files)
+                 if not f.is_already_formatted
+                 and f.date_source in ('metadata', 'filename')
+                 and not f.user_moved),
+                None)
+        else:
+            target = next(
+                (i for i, f in enumerate(files) if f.needs_attention),
+                None)
+        if target is not None:
+            idx = self._model.index(target, COL_FILENAME)
+            self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+            self._table.setCurrentIndex(idx)
 
     def _open_file(self, filepath: str):
         try:
@@ -762,11 +860,42 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     def _on_attention_required(self, count: int):
-        if count > 0:
-            self._btn_attention.setText(f'⚠  {count} file(s) need attention')
-            self._act_attention.setVisible(True)
+        self._refresh_attention_button()
+
+    def _refresh_attention_button(self):
+        files = self._model.files()
+        if self._is_phase1:
+            n = sum(1 for f in files
+                    if not f.is_already_formatted
+                    and f.date_source in ('metadata', 'filename')
+                    and not f.user_moved)
+            if n > 0:
+                self._btn_attention.setText(f'⚠  {n} file(s) need renaming')
+                self._act_attention.setVisible(True)
+            else:
+                self._act_attention.setVisible(False)
         else:
-            self._act_attention.setVisible(False)
+            n = sum(1 for f in files if f.needs_attention)
+            if n > 0:
+                self._btn_attention.setText(f'⚠  {n} file(s) need ordering')
+                self._act_attention.setVisible(True)
+            else:
+                self._act_attention.setVisible(False)
+
+    def _on_phase_changed(self, is_phase1: bool):
+        self._is_phase1 = is_phase1
+        for delegate in (self._check_delegate, self._order_delegate,
+                         self._filename_delegate, self._date_delegate,
+                         self._preview_delegate, self._thumb_delegate,
+                         self._move_delegate):
+            delegate.set_phase1(is_phase1)
+        tooltip = ('Rename files with proposed new filenames first — click Apply rename'
+                   if is_phase1 else '')
+        self._btn_up.setToolTip(tooltip)
+        self._btn_down.setToolTip(tooltip)
+        self._refresh_move_buttons()
+        self._refresh_status()
+        self._table.viewport().update()
 
     def _on_rename_complete(self, success: int, errors: int):
         if errors == 0:
@@ -800,30 +929,38 @@ class MainWindow(QMainWindow):
     def _refresh_status(self):
         files = self._model.files()
         total = len(files)
-        will_rename = sum(
-            1 for f in files
-            if f.proposed_filename != f.filename
-            and f.proposed_filename not in ('— nudge into position →', '')
-        )
-        flagged = sum(1 for f in files if f.needs_attention)
-
         self._lbl_files.setText(f'{total} files')
-        self._lbl_flagged.setText(f'  ·  {flagged} flagged' if flagged else '')
-        self._lbl_toolbar_rename.setText(
-            f'{will_rename} file(s) to be renamed' if will_rename else '')
-
         self._btn_apply.setEnabled(self._model.has_pending_renames())
 
-        if flagged > 0:
-            self._btn_attention.setText(f'⚠  {flagged} file(s) need attention')
-            self._act_attention.setVisible(True)
+        if self._is_phase1:
+            n = sum(1 for f in files
+                    if not f.is_already_formatted
+                    and f.date_source in ('metadata', 'filename')
+                    and not f.user_moved)
+            self._lbl_flagged.setText('')
+            self._lbl_toolbar_rename.setText(
+                f'Rename the {n} highlighted file(s)')
         else:
-            self._act_attention.setVisible(False)
+            will_rename = sum(
+                1 for f in files
+                if f.proposed_filename != f.filename
+                and not f.proposed_filename.startswith('---')
+                and f.proposed_filename != ''
+            )
+            flagged = sum(1 for f in files if f.needs_attention)
+            self._lbl_flagged.setText(f'  ·  {flagged} flagged' if flagged else '')
+            self._lbl_toolbar_rename.setText(
+                f'{will_rename} file(s) to be renamed.' if will_rename else '')
+        self._refresh_attention_button()
 
     def _refresh_move_buttons(self):
-        has_sel = bool(self._model.get_selected_indices())
-        self._btn_up.setEnabled(has_sel)
-        self._btn_down.setEnabled(has_sel)
+        if self._is_phase1:
+            self._btn_up.setEnabled(False)
+            self._btn_down.setEnabled(False)
+        else:
+            has_sel = bool(self._model.get_selected_indices())
+            self._btn_up.setEnabled(has_sel)
+            self._btn_down.setEnabled(has_sel)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -889,6 +1026,49 @@ def main():
     palette.setColor(QPalette.ToolTipBase,     QColor('#FFFFFF'))
     palette.setColor(QPalette.ToolTipText,     QColor('#111827'))
     app.setPalette(palette)
+
+    app.setStyleSheet('''
+        QMessageBox {
+            background-color: #FFFFFF;
+            font-size: 13px;
+            color: #111827;
+        }
+        QMessageBox QLabel {
+            color: #111827;
+            font-size: 13px;
+            padding: 8px;
+        }
+        QMessageBox QPushButton {
+            border: 1px solid #D1D5DB;
+            border-radius: 5px;
+            padding: 6px 16px;
+            background: #FFFFFF;
+            font-size: 12px;
+            color: #374151;
+            min-width: 80px;
+        }
+        QMessageBox QPushButton:hover {
+            background: #F3F4F6;
+        }
+        QMessageBox QPushButton:pressed {
+            background: #E5E7EB;
+        }
+        QMessageBox QPushButton[text="Yes"],
+        QMessageBox QPushButton[text="OK"] {
+            background: #2563EB;
+            border-color: #1D4ED8;
+            color: white;
+            font-weight: 600;
+        }
+        QMessageBox QPushButton[text="Yes"]:hover,
+        QMessageBox QPushButton[text="OK"]:hover {
+            background: #1D4ED8;
+        }
+        QMessageBox QPushButton[text="Yes"]:pressed,
+        QMessageBox QPushButton[text="OK"]:pressed {
+            background: #1E40AF;
+        }
+    ''')
 
     window = MainWindow()
     window.show()
