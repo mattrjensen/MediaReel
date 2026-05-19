@@ -1,0 +1,15 @@
+# PyInstaller build output
+dist/
+build/
+*.spec
+
+# Python virtual environment
+venv/
+
+# Vendor binaries (too large, user downloads separately)
+vendor/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
