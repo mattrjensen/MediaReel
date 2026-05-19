@@ -1,7 +1,6 @@
 # PyInstaller build output
 dist/
 build/
-*.spec
 
 # Python virtual environment
 venv/
