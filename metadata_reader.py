@@ -1,10 +1,22 @@
 import os
 import re
+import sys
 import exiftool
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS
+
+
+def _vendor_path(filename: str) -> str:
+    """Resolve a vendor binary path for both source and PyInstaller builds."""
+    if getattr(sys, 'frozen', False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    return str(base / 'vendor' / filename)
+
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 SUPPORTED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.heic', '.heif',
@@ -74,7 +86,7 @@ def read_metadata(filepath: str) -> dict:
         'stripped_filename': strip_date_from_filename(filename),
     }
 
-    exiftool_path = Path(__file__).parent / 'vendor' / 'exiftool.exe'
+    exiftool_path = _vendor_path('exiftool.exe')
 
     try:
         with exiftool.ExifToolHelper(executable=str(exiftool_path)) as et:

@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+
+
+def _vendor_path(filename: str) -> str:
+    """Resolve a vendor binary path for both source and PyInstaller builds."""
+    if getattr(sys, 'frozen', False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    return str(base / 'vendor' / filename)
+
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QThreadPool,
@@ -167,7 +179,7 @@ class MetadataWorker(QRunnable):
     def _video_thumbnail(self, filepath: str) -> Optional[QImage]:
         """Extract first frame via ffmpeg into a persistent temp file."""
         import subprocess
-        ffmpeg = str(Path(__file__).parent / 'vendor' / 'ffmpeg.exe')
+        ffmpeg = _vendor_path('ffmpeg.exe')
         # Use a named temp file that persists until we explicitly delete it
         import tempfile, os
         fd, out = tempfile.mkstemp(suffix='.jpg')
@@ -179,7 +191,8 @@ class MetadataWorker(QRunnable):
                  '-vframes', '1',
                  '-q:v', '4',
                  out],
-                capture_output=True, timeout=15
+                capture_output=True, timeout=15,
+                creationflags=CREATE_NO_WINDOW
             )
             if os.path.getsize(out) > 0:
                 img = self._image_thumbnail(out)
@@ -196,11 +209,12 @@ class MetadataWorker(QRunnable):
     def _get_video_duration(self, filepath: str) -> Optional[int]:
         """Return video duration in seconds via exiftool."""
         import subprocess
-        exiftool = str(Path(__file__).parent / 'vendor' / 'exiftool.exe')
+        exiftool = _vendor_path('exiftool.exe')
         try:
             result = subprocess.run(
                 [exiftool, '-Duration#', '-s3', filepath],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW
             )
             val = result.stdout.strip()
             if val:
@@ -663,7 +677,7 @@ class MediaTableModel(QAbstractTableModel):
         Checks existence before renaming, collects errors without stopping.
         Writes metadata timestamp for interpolated files only.
         """
-        exiftool_path = str(Path(__file__).parent / 'vendor' / 'exiftool.exe')
+        exiftool_path = _vendor_path('exiftool.exe')
         success = 0
         errors  = 0
 
@@ -742,7 +756,8 @@ class MediaTableModel(QAbstractTableModel):
         try:
             import subprocess
             subprocess.run([exiftool_path] + tags + [filepath],
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15,
+                           creationflags=CREATE_NO_WINDOW)
         except Exception:
             pass
 
