@@ -93,7 +93,8 @@ python main.py
 ### Build to .exe
 
 ```bash
-# Coming soon — PyInstaller packaging
+pyinstaller --onedir --windowed --name "MediaReel" --icon assets/icon.ico main.py
+xcopy /E /I vendor dist\MediaReel\vendor
 ```
 
 ---
@@ -102,14 +103,14 @@ python main.py
 
 ```
 MediaReel/
-    vendor/
-        exiftool.exe
-        exiftool_files/
-        ffmpeg.exe
-    metadata_reader.py    # metadata reading and filename logic
-    media_model.py        # data model, file state logic, rename engine
     main.py               # UI — PySide6 main window, delegates, toolbar
+    media_model.py        # data model, file state logic, rename engine
+    metadata_reader.py    # metadata reading and filename logic
+    assets/               # icons and images
+    tests/                # automated tests and diagnostic scripts
+    vendor/               # exiftool.exe + exiftool_files/, ffmpeg.exe (not in repo)
     CLAUDE.md             # full design spec and decisions
+    DEVELOPMENT.md        # how to run, build, and test
     README.md             # this file
 ```
 
@@ -143,8 +144,6 @@ MVP — actively used and tested on real event photo collections.
 - Thumbnail click to open in default app
 
 **Planned:**
-- PyInstaller `.exe` packaging
-- Two-phase workflow UI (commit anchors modal)
 - Padlock locking/unlocking per file
 - Mac support
 - Manual date/time editing per file
