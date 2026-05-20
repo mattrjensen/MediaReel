@@ -1,4 +1,0 @@
-cd D:\Documents\Projects\MediaReel
-venv\Scripts\activate
-python main.py
-
