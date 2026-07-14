@@ -4,7 +4,7 @@
 
 ```bat
 D:
-cd D:\Documents\Projects\MediaReel
+cd D:\Documents\Work\Projects\MediaReel
 venv\Scripts\activate
 python main.py
 ```
