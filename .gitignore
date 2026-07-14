@@ -12,3 +12,8 @@ vendor/
 __pycache__/
 *.pyc
 *.pyo
+
+# Test data
+tests/test data/
+
+assets/ideas/
