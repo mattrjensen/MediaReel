@@ -442,6 +442,8 @@ class MediaTableModel(QAbstractTableModel):
         ])
 
         if not filepaths:
+            self.folder_load_started.emit(0)
+            self.folder_load_complete.emit()
             return
 
         self.folder_load_started.emit(len(filepaths))
