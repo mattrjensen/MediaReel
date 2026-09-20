@@ -96,10 +96,13 @@ def read_metadata(filepath: str) -> dict:
             # iOS stores this with timezone offset (e.g. 2026:03:28 22:33:36+11:00)
             # which is reliable local time. QuickTime:CreateDate is UTC on iOS.
             candidates = [
-                'QuickTime:DateTimeOriginal',  # iOS video — local time with tz offset e.g. 2026:03:28 21:10:31+11:00
-                               # Note: exiftool CLI shows this as UserData:DateTimeOriginal but
-                               # pyexiftool returns it with group prefix QuickTime:DateTimeOriginal
-                'EXIF:DateTimeOriginal',
+                'QuickTime:CreationDate',      # iOS .mov — local time with tz offset e.g. 2026:07:04 14:48:46+12:00
+                                               # Note: exiftool CLI shows this as Keys:CreationDate but
+                                               # pyexiftool returns it as QuickTime:CreationDate
+                'QuickTime:DateTimeOriginal',  # iOS .mp4 — local time with tz offset
+                                   # Note: exiftool CLI shows as UserData:DateTimeOriginal but
+                                   # pyexiftool returns as QuickTime:DateTimeOriginal
+                 'EXIF:DateTimeOriginal',
                 'EXIF:CreateDate',
                 'QuickTime:CreateDate',
                 'QuickTime:MediaCreateDate',

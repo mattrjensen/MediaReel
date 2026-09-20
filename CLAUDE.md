@@ -54,13 +54,35 @@ The `date_source` field records which tier was used: `metadata`, `filename`, `da
 **Weak/no date** = `date_source` is `date modified` or `none`
 
 ### iOS video timezone correction
-iOS stores `QuickTime:CreateDate` in UTC, not local time. The correct local-time
-tag for iOS videos is `QuickTime:DateTimeOriginal` which includes a timezone offset
-(e.g. `2026:03:28 21:10:31+11:00`). This tag must appear first in the candidates
-list for video metadata reading. The `[:19]` truncation in the parser strips the
-offset suffix cleanly, giving correct local time. `QuickTime:CreateDate` should
-remain in the list as a fallback for non-iOS video files (Android stores local
-time there).
+iOS stores `QuickTime:CreateDate` in UTC, not local time. Two iOS-specific tags
+contain the correct local time with timezone offset embedded — both must appear
+at the top of the candidates list, above `QuickTime:CreateDate`:
+
+1. **`QuickTime:CreationDate`** — used by iOS `.mov` files (e.g. `2026:07:04 14:48:46+12:00`).
+   Shown as `Keys:CreationDate` in the exiftool CLI but returned as
+   `QuickTime:CreationDate` by pyexiftool. Must be first in the candidates list.
+
+2. **`QuickTime:DateTimeOriginal`** — used by iOS `.mp4` files (e.g. `2026:03:28 21:10:31+11:00`).
+   Shown as `UserData:DateTimeOriginal` in the exiftool CLI but returned as
+   `QuickTime:DateTimeOriginal` by pyexiftool.
+
+The `[:19]` truncation in the parser strips the timezone offset suffix cleanly,
+giving correct local time. `QuickTime:CreateDate` remains in the list as a
+fallback for non-iOS video files (Android stores local time there).
+
+**Full candidates list order:**
+```python
+candidates = [
+    'QuickTime:CreationDate',      # iOS .mov — local time with tz offset
+    'QuickTime:DateTimeOriginal',  # iOS .mp4 — local time with tz offset
+    'EXIF:DateTimeOriginal',
+    'EXIF:CreateDate',
+    'QuickTime:CreateDate',
+    'QuickTime:MediaCreateDate',
+    'XMP:DateTimeOriginal',
+    'XMP:CreateDate',
+]
+```
 
 ---
 
