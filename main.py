@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -213,9 +215,20 @@ class ThumbnailDelegate(BaseDelegate):
                 painter.setPen(QColor('#FFFFFF'))
                 painter.drawText(bx, by, bw, bh, Qt.AlignCenter, dur)
         else:
-            # Placeholder
+            # Placeholder. While the thumbnail is still loading it pulses
+            # between two greys (phase from the wall clock, so every loading
+            # cell pulses in step; MainWindow repaints this column on a
+            # timer while any are pending). Once loading has finished
+            # without an image it stays a static, non-pulsing grey.
             pr = option.rect.adjusted(6, 4, -6, -4)
-            painter.setBrush(QColor('#F3F4F6'))
+            if f and not f.thumbnail_loaded:
+                k = 0.5 - 0.5 * math.cos(2 * math.pi * (time.monotonic() % 1.2) / 1.2)
+                painter.setBrush(QColor(
+                    round(243 + (229 - 243) * k),
+                    round(244 + (231 - 244) * k),
+                    round(246 + (235 - 246) * k)))
+            else:
+                painter.setBrush(QColor('#F3F4F6'))
             painter.setPen(QColor('#D1D5DB'))
             painter.drawRoundedRect(pr, 4, 4)
             if f and f.is_video:
@@ -224,6 +237,19 @@ class ThumbnailDelegate(BaseDelegate):
                 painter.setFont(f2)
                 painter.setPen(QColor('#9CA3AF'))
                 painter.drawText(pr, Qt.AlignCenter, '▶')
+
+            if f and not f.thumbnail_loaded:
+                # Videos keep their ▶ glyph in the centre, so the text sits
+                # at the bottom of the box for them; photos get it centred.
+                f3 = painter.font()
+                f3.setPointSize(7)
+                painter.setFont(f3)
+                painter.setPen(QColor('#9CA3AF'))
+                if f.is_video:
+                    painter.drawText(pr.adjusted(0, 0, 0, -3),
+                                     Qt.AlignHCenter | Qt.AlignBottom, 'Loading…')
+                else:
+                    painter.drawText(pr, Qt.AlignCenter, 'Loading…')
 
         painter.restore()
 
@@ -664,6 +690,13 @@ class MainWindow(QMainWindow):
 
         self._model.folder_load_started.connect(self._on_load_started)
         self._model.folder_load_complete.connect(self._on_load_complete)
+        self._model.thumbnails_complete.connect(self._on_thumbnails_complete)
+
+        # Repaints just the thumbnail column while thumbnails are loading, so
+        # their placeholders pulse (see ThumbnailDelegate.paint).
+        self._thumb_pulse_timer = QTimer(self)
+        self._thumb_pulse_timer.setInterval(80)
+        self._thumb_pulse_timer.timeout.connect(self._repaint_thumb_column)
         self._model.file_progress.connect(self._overlay.set_progress)
         self._model.attention_required.connect(self._on_attention_required)
         self._model.metadata_load_error.connect(self._on_metadata_load_error)
@@ -845,8 +878,6 @@ class MainWindow(QMainWindow):
     # ── Model callbacks ───────────────────────────────────────────────────────
 
     def _on_load_started(self, count: int):
-        import time
-        print(f'[DIAG] _on_load_started at t={time.perf_counter():.2f}, count={count}')
         self._progress.setMaximum(count)
         self._progress.setValue(0)
         self._progress.setVisible(True)
@@ -856,13 +887,20 @@ class MainWindow(QMainWindow):
         self._btn_down.setEnabled(False)
         self._act_attention.setVisible(False)  # clear stale state from previous folder
         self._overlay.start()
+        self._thumb_pulse_timer.start()
 
     def _on_load_complete(self):
-        import time
-        print(f'[DIAG] _on_load_complete slot running at t={time.perf_counter():.2f}, calling overlay.stop()')
         self._progress.setVisible(False)
         self._overlay.stop()
         self._refresh_status()
+
+    def _on_thumbnails_complete(self):
+        self._thumb_pulse_timer.stop()
+
+    def _repaint_thumb_column(self):
+        vp = self._table.viewport()
+        vp.update(self._table.columnViewportPosition(COL_THUMB), 0,
+                  self._table.columnWidth(COL_THUMB), vp.height())
 
     def _on_metadata_load_error(self, message: str):
         QMessageBox.critical(

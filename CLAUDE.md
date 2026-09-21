@@ -440,35 +440,71 @@ the right interaction in expanded mode.
 - Metadata (dates, duration) is read for all files via several concurrent
   sharded exiftool batch calls; thumbnails are generated separately, one per
   file, in parallel
-- Spinner overlay shown during load; hides as soon as metadata is ready
-  (thumbnails keep filling in progressively afterwards — see Threading)
+- Spinner overlay and its progress ring track metadata only, and hide when
+  all metadata has been read (`folder_load_complete`) — a few seconds for
+  2000 files. The UI is usable from that point.
+- Thumbnails keep loading afterwards. Thumbnail cells that haven't loaded
+  yet show a pulsing grey placeholder (see Thumbnail loading state below);
+  it stops when `thumbnails_complete` fires.
 - On metadata completion: sort alphabetically by filename, then `recalculate_proposed_filenames()`
+
+### Thumbnail loading state
+`MediaFile.thumbnail_loaded` is `False` until the thumbnail worker has
+finished with that file, *whether or not it produced an image*
+(`ThumbnailWorker` always emits `thumb_ready`, with `qimage=None` on
+failure). `ThumbnailDelegate.paint` uses it to tell three states apart:
+image present → draw it; not yet loaded → grey placeholder pulsing between
+two greys (phase from `time.monotonic()`, so all loading cells pulse in
+step) with a small static "Loading…" label (centred for photos; at the
+bottom for videos, which keep their ▶ glyph in the centre); loaded but no
+image (corrupt file, unsupported format) → static grey placeholder, no
+label. The pulse alone is a subtle contrast, hence the text; if the label
+proves too busy with many rows visible, drop it and strengthen the pulse. `MainWindow._thumb_pulse_timer` (80ms) repaints only the
+thumbnail column, started in `_on_load_started` and stopped by
+`thumbnails_complete`. Metadata chunks replace the row's `MediaFile`, so
+`_on_metadata_chunk_ready` must carry `thumbnail` and `thumbnail_loaded`
+across from the old object.
 
 ### Threading
 Metadata reading and thumbnail generation are decoupled, because launching
 one `exiftool.exe` process per file was the dominant cost for large folders
 (2000+ files) — see `metadata_reader.read_metadata_batch()`. Measured on a
-real 2000-file folder (mixed photos/videos): ~209ms/file with the original
-one-process-per-file approach (~418s sequential, ~87.5s with the old
-per-file worker's 16-way concurrency), vs. the current design's ~65s to
-`folder_load_complete` and ~82s for everything including thumbnails.
+real 2000-file folder (mixed photos/videos, 16 threads): ~209ms/file with
+the original one-process-per-file approach (~418s sequential, ~87.5s with
+the old per-file worker's 16-way concurrency, metadata + thumbnails
+together). Current design: all metadata in ~2.5-5s, everything including
+thumbnails in ~54s — thumbnails are now the dominant cost of a load.
+Single exiftool process, no sharding: ~13s for all metadata.
 
-- **Metadata is sharded, not read by a single worker**: a lone
-  `MetadataBatchWorker` running one persistent exiftool process for all
-  files has *no internal parallelism* — it parses files one at a time
-  regardless of free CPU threads, and measured **slower** (~270s) than the
-  old one-process-per-file approach's 16-way concurrency, because it trades
-  away that concurrency for reduced process-launch overhead and loses more
-  than it gains. `load_folder()` instead splits the file list into
-  `min(pool.maxThreadCount(), file_count)` shards, each its own
-  `MetadataBatchWorker` with its own persistent exiftool process
-  (`start_index` offset so `chunk_ready` reports correct global row
-  indices) — this recovers full parallelism while still avoiding one
-  exiftool launch per file. Shards use the *full* thread pool rather than
-  a fraction reserved for thumbnails: thumbnails finish much faster than
-  metadata regardless of split (measured ~20-30s vs. metadata's 65s+), so
-  reserving capacity for them for the whole run just leaves cores idle
-  once thumbnails are already done.
+- **exiftool output must be decoded as UTF-8** (`EXIFTOOL_ENCODING` in
+  `metadata_reader.py`, passed to every `ExifToolHelper`). pyexiftool
+  otherwise decodes with the platform default (cp1252 on Windows), and one
+  non-ASCII byte in any file's metadata raises `UnicodeDecodeError` for the
+  whole call. In a batch that took out the entire 100-file chunk, which
+  then fell back to one exiftool launch per file (~200ms each) — this, not
+  file clustering or CPU contention, was the cause of the shards that sat
+  at "3 shards remaining" for ~90s (metadata took ~103s in the app vs ~2.5s
+  once fixed). It also affected the original `read_metadata()`: an affected
+  file silently lost its metadata date and fell through to filename / date
+  modified (5 `.HEIC` files in the test folder showed a `filename` badge
+  instead of `metadata`; the dates themselves happened to match). Diagnosing
+  this took several wrong turns (thread starvation, straggler shards,
+  progress-signal semantics) because the fallback path hid the exception —
+  if a shard is ever again dramatically slower than the others, look for a
+  chunk raising and falling back before looking at scheduling.
+
+- **Metadata is sharded across several exiftool processes**: one persistent
+  exiftool process parses files serially (~13s for 2000 files), so
+  `load_folder()` splits the file list into
+  `min(pool.maxThreadCount(), file_count)` contiguous slices, each read by
+  its own `MetadataBatchWorker` with its own persistent process
+  (`start_index` is the slice's offset, so `chunk_ready` reports global row
+  indices) — ~2.5-5s. This is an optimisation, not a necessity: a single
+  worker would be simpler (no shard counter / `start_index` / per-shard
+  bookkeeping) at the cost of ~13s instead of ~3s to a usable UI. The
+  shard design was originally justified by a measurement of a lone worker
+  taking ~270s, but that number was inflated by the UTF-8 fallback bug
+  above and should be disregarded.
 - Each `MetadataBatchWorker` shard calls `read_metadata_batch()`, which
   reads its slice of files (including video duration, via the
   `QuickTime:Duration` tag) in chunks of `METADATA_CHUNK_SIZE` (100).
@@ -519,16 +555,25 @@ per-file worker's 16-way concurrency), vs. the current design's ~65s to
   (a chunk in progress can't be cancelled mid-call, and a running
   `ThumbnailWorker` finishes its current file) — cancellation only stops
   work from *starting* for the old generation.
-- **`folder_load_complete` timing is a deliberate trade-off, not the
-  simplest option**: it fires once metadata is fully read and
-  `recalculate_proposed_filenames()` has run, without waiting for
-  thumbnails — `MediaTableModel.WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE` (class
-  constant, default `False`) controls this. This is what makes the
-  batching speedup visible: thumbnail generation (image decode + ffmpeg
-  frame extraction) is the larger remaining cost for big folders, so
-  gating the spinner on it would hide the improvement. Set the constant to
-  `True` to restore the pre-batching behaviour of waiting for every
-  thumbnail too.
+- **The overlay's progress and `folder_load_complete` are about metadata
+  only; thumbnails are signalled separately.** `file_progress` is a running
+  count of metadata files done (shards complete chunks concurrently, so it
+  is a total, not any one shard's high-water mark). `folder_load_complete`
+  fires when the last metadata shard finishes and
+  `recalculate_proposed_filenames()` has run, and the UI is usable from
+  then. `thumbnails_complete` fires when every `ThumbnailWorker` has
+  reported (success or failure), typically well after. This was a
+  deliberate choice for an async, usable-early feel; the alternatives were
+  tried and rejected: gating the spinner on thumbnails too (needs a
+  "fully-done" progress count with per-file flags, keeps the UI blocked for
+  the ~50s thumbnail phase). The gap is covered by the thumbnail loading
+  state above rather than by keeping the overlay up.
+- **`MainWindow._on_model_data_changed` skips `_refresh_status()` for
+  thumbnail-only `dataChanged` (`roles == [Qt.DecorationRole]`)**.
+  `_refresh_status()` does several O(n) scans over every file and depends
+  only on dates/rename state, never on thumbnails; without the skip, ~2000
+  thumbnail arrivals each re-ran those scans, saturating the main thread
+  and making the UI look frozen during the thumbnail phase.
 - Thumbnails are matched back to their row by filepath, not just index
   (`_resolve_index`): the one-time sort in `_on_metadata_shard_finished`
   (once every shard has finished) can reorder rows while thumbnails for
@@ -555,8 +600,9 @@ Key styles applied:
 
 ```python
 folder_load_started = Signal(int)       # file count
-folder_load_complete = Signal()         # fires once metadata is ready — see Threading
-file_progress = Signal(int, int)        # done, total (metadata chunk progress)
+folder_load_complete = Signal()         # all metadata read — UI usable
+thumbnails_complete = Signal()          # every thumbnail attempted (usually after the above)
+file_progress = Signal(int, int)        # metadata files done, total
 attention_required = Signal(int)        # count of files needing attention
 rename_progress = Signal(int, int)      # done, total
 rename_complete = Signal(int, int)      # success_count, error_count
