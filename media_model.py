@@ -26,7 +26,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPixmap, QImage
 
 from metadata_reader import (
-    read_metadata, build_new_filename,
+    read_metadata_batch, build_new_filename,
     SUPPORTED_EXTENSIONS,
     DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED
 )
@@ -103,55 +103,90 @@ class MediaFile:
 
 
 # ── Worker signals ──────────────────────────────────────────────────────────
-# Each MetadataWorker owns its own WorkerSignals instance to avoid
-# garbage-collection issues with shared signal objects in QThreadPool.
-class WorkerSignals(QObject):
-    file_ready  = Signal(int, object)  # (index, MediaFile)
-    thumb_ready = Signal(int, object)  # (index, QImage) — converted to QPixmap on main thread
-    finished    = Signal()
+# Each worker owns its own signals instance to avoid garbage-collection
+# issues with shared signal objects in QThreadPool.
+class ThumbnailSignals(QObject):
+    thumb_ready = Signal(int, object, int, str)  # (index, QImage, generation, filepath)
+    finished    = Signal(int, int, str)          # (index, generation, filepath)
 
 
-# ── Metadata + thumbnail worker ─────────────────────────────────────────────
-class MetadataWorker(QRunnable):
+class BatchSignals(QObject):
+    chunk_ready = Signal(object, object, int)  # (list[int] global indices, list[dict], generation)
+    error       = Signal(str, int)             # (message, generation)
+    finished    = Signal(int)                  # (generation)
+
+
+# ── Metadata batch worker ───────────────────────────────────────────────────
+# A single persistent exiftool process has no internal parallelism — it
+# parses files one at a time regardless of how many CPU threads are free, so
+# a lone MetadataBatchWorker for all 2000 files loses the concurrency the old
+# one-process-per-file approach got "for free" from running 16 processes at
+# once (measured: ~270s for one process vs ~58s sharded 16 ways on the same
+# 2000-file folder). load_folder() shards the file list across several of
+# these workers, each with its own persistent exiftool process, to get both
+# benefits — few process launches, and real parallelism.
+class MetadataBatchWorker(QRunnable):
+
+    def __init__(self, filepaths: List[str], generation: int, start_index: int = 0):
+        super().__init__()
+        self.filepaths   = filepaths
+        self.generation  = generation
+        self.start_index = start_index  # offset into the full file list, for chunk_ready
+        self.signals     = BatchSignals()
+        self._cancelled  = False
+        self.setAutoDelete(True)
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        if self._cancelled:
+            return  # cancelled before a thread even picked this up
+        try:
+            read_metadata_batch(
+                self.filepaths,
+                on_chunk=lambda start, results:
+                    self.signals.chunk_ready.emit(self.start_index + start, results, self.generation),
+                is_cancelled=lambda: self._cancelled,
+            )
+        except Exception as e:
+            self.signals.error.emit(str(e), self.generation)
+        finally:
+            self.signals.finished.emit(self.generation)
+
+
+# ── Thumbnail worker ────────────────────────────────────────────────────────
+# One instance per file, still parallel across the thread pool — decoupled
+# from metadata reading so a folder full of videos doesn't serialize
+# thumbnail generation behind (or in front of) the metadata batch.
+class ThumbnailWorker(QRunnable):
 
     THUMB_W = 160  # always load at expanded size — delegates scale down for compact
     THUMB_H = 120
 
-    def __init__(self, index: int, filepath: str):
+    def __init__(self, index: int, filepath: str, is_video: bool, generation: int,
+                 current_generation_ref: List[int]):
         super().__init__()
-        self.index    = index
-        self.filepath = filepath
-        self.signals  = WorkerSignals()
+        self.index      = index
+        self.filepath   = filepath
+        self.is_video   = is_video
+        self.generation = generation
+        # Shared with MediaTableModel: current_generation_ref[0] is the
+        # model's live _load_generation. A worker queued for an abandoned
+        # load can sit behind thousands of others before a thread picks it
+        # up — checking this before doing any decode work means a reload
+        # doesn't leave stale work competing for CPU with the new load.
+        self._current_generation_ref = current_generation_ref
+        self.signals    = ThumbnailSignals()
         self.setAutoDelete(True)
 
     def run(self):
-        meta     = read_metadata(self.filepath)
-        ext      = Path(self.filepath).suffix.lower()
-        is_video = ext in {'.mp4', '.mov', '.avi'}
-
-        duration = None
-        if is_video:
-            duration = self._get_video_duration(self.filepath)
-
-        mf = MediaFile(
-            filepath             = meta['filepath'],
-            filename             = meta['filename'],
-            ext                  = meta['ext'],
-            is_video             = meta['is_video'],
-            is_already_formatted = meta['is_already_formatted'],
-            date                 = meta['date'],
-            date_source          = meta['date_source'],
-            stripped_filename    = meta['stripped_filename'],
-            duration_seconds     = duration,
-        )
-        self.signals.file_ready.emit(self.index, mf)
-
-        # Generate thumbnail after emitting file data so the row appears fast
-        qimage = self._make_thumbnail(self.filepath, is_video)
+        if self._current_generation_ref[0] != self.generation:
+            return  # superseded by a newer load — nothing to do, nothing to emit
+        qimage = self._make_thumbnail(self.filepath, self.is_video)
         if qimage is not None:
-            self.signals.thumb_ready.emit(self.index, qimage)
-
-        self.signals.finished.emit()
+            self.signals.thumb_ready.emit(self.index, qimage, self.generation, self.filepath)
+        self.signals.finished.emit(self.index, self.generation, self.filepath)
 
     def _make_thumbnail(self, filepath: str, is_video: bool) -> Optional[QImage]:
         try:
@@ -204,23 +239,6 @@ class MetadataWorker(QRunnable):
                 os.unlink(out)
             except Exception:
                 pass
-        return None
-
-    def _get_video_duration(self, filepath: str) -> Optional[int]:
-        """Return video duration in seconds via exiftool."""
-        import subprocess
-        exiftool = _vendor_path('exiftool.exe')
-        try:
-            result = subprocess.run(
-                [exiftool, '-Duration#', '-s3', filepath],
-                capture_output=True, text=True, timeout=10,
-                creationflags=CREATE_NO_WINDOW
-            )
-            val = result.stdout.strip()
-            if val:
-                return int(float(val))
-        except Exception:
-            pass
         return None
 
 
@@ -339,14 +357,63 @@ class MediaTableModel(QAbstractTableModel):
     rename_progress      = Signal(int, int) # done, total
     rename_complete      = Signal(int, int) # success_count, error_count
     phase_changed        = Signal(bool)     # True = Phase 1, False = Phase 2
+    metadata_load_error  = Signal(str)      # exiftool could not start at all
+
+    # If True, folder_load_complete waits for every thumbnail too — the UI
+    # only becomes usable, and the spinner only hides, once every row is
+    # fully ready. If False, it fires as soon as metadata for every file is
+    # read, before thumbnails finish. True is the deliberate choice: with it
+    # False, the spinner raced to "done" within seconds (metadata alone),
+    # then sat there through the much longer thumbnail phase with nothing
+    # to show for it — reads as broken, not fast.
+    WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._files: List[MediaFile] = []
         self._pool  = QThreadPool.globalInstance()
-        self._pending_workers = 0
-        self._total_workers   = 0
         self._is_phase1 = False
+
+        # Loading state for the current folder load. _load_generation is
+        # bumped on every load_folder() call; workers from a superseded load
+        # carry the old generation and are ignored by the callbacks below —
+        # this is what makes it safe to load a new folder while a previous
+        # one is still loading, instead of splicing stale rows into the
+        # new list.
+        self._load_generation      = 0
+        # Shared with every ThumbnailWorker so a queued-but-not-yet-started
+        # worker from an abandoned load can tell it's stale before doing any
+        # decode work, without needing a reference back to the model itself.
+        self._current_generation_ref: List[int] = [0]
+        self._total_files          = 0
+        self._metadata_finished    = False
+        self._load_complete_emitted = False
+        self._metadata_error_shown = False
+        self._pending_thumbnails   = 0
+        self._pending_metadata_shards = 0
+        self._current_batch_workers: List[MetadataBatchWorker] = []
+
+        # file_progress tracks files that are FULLY done (metadata AND
+        # thumbnail), not just metadata — metadata finishes much faster than
+        # thumbnails, so a metadata-only progress count raced to "done" in
+        # seconds and then sat there through the whole thumbnail phase.
+        # Metadata arrives in chunks and thumbnails arrive individually, in
+        # no fixed order relative to each other, so per-file flags (not a
+        # single counter) are what let a file's "second" completion event
+        # be told apart from its "first" — that's the moment it counts.
+        self._metadata_done_flags: List[bool]  = []
+        self._thumbnail_done_flags: List[bool] = []
+        self._fully_done_count = 0
+
+        # QThreadPool.start() does not keep a Python reference to the
+        # runnable — once run() returns, nothing stops the GC from
+        # collecting the worker (and its unparented `signals` QObject)
+        # before a still-queued cross-thread signal has been delivered to
+        # the main thread, which surfaces as "RuntimeError: Signal source
+        # has been deleted" and silently drops whatever that emit carried.
+        # Keeping every in-flight worker referenced here for the life of
+        # its generation is what prevents that.
+        self._active_workers: List[QRunnable] = []
 
     # ── Qt model interface ───────────────────────────────────────────────────
 
@@ -431,6 +498,31 @@ class MediaTableModel(QAbstractTableModel):
     # ── Public API ───────────────────────────────────────────────────────────
 
     def load_folder(self, folder_path: str):
+        # Cancel any load already in flight. Workers from that generation
+        # keep running to completion (a chunk in progress can't be
+        # interrupted mid-call), but their results are now stale and get
+        # dropped by the generation check in the callbacks below — nothing
+        # from the old folder can land in the new file list.
+        for worker in self._current_batch_workers:
+            worker.cancel()
+        self._current_batch_workers = []
+        self._load_generation += 1
+        generation = self._load_generation
+        self._current_generation_ref[0] = generation
+        # Drop any not-yet-started runnables still queued from the old
+        # generation — safe since this app is the only user of the global
+        # pool. Ones already running can't be interrupted (see
+        # ThumbnailWorker.run() and MetadataBatchWorker.run()'s early-exit
+        # checks for how those avoid wasted work instead).
+        self._pool.clear()
+        # Deliberately not clearing _active_workers here: an old-generation
+        # worker may still be mid-run() (cancel() only stops new work from
+        # starting), and dropping its Python reference while a queued
+        # cross-thread signal from it is still in flight would reintroduce
+        # the exact "Signal source has been deleted" race this list exists
+        # to prevent. It stays a permanent keep-alive registry for the life
+        # of the model — negligible memory cost for what it buys.
+
         self.beginResetModel()
         self._files = []
         self.endResetModel()
@@ -441,14 +533,23 @@ class MediaTableModel(QAbstractTableModel):
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
         ])
 
+        self._total_files           = len(filepaths)
+        self._metadata_finished     = False
+        self._load_complete_emitted = False
+        self._metadata_error_shown  = False
+        self._pending_thumbnails    = len(filepaths)
+        self._metadata_done_flags   = [False] * len(filepaths)
+        self._thumbnail_done_flags  = [False] * len(filepaths)
+        self._fully_done_count      = 0
+
         if not filepaths:
             self.folder_load_started.emit(0)
+            self._metadata_finished     = True
+            self._load_complete_emitted = True
             self.folder_load_complete.emit()
             return
 
         self.folder_load_started.emit(len(filepaths))
-        self._total_workers   = len(filepaths)
-        self._pending_workers = len(filepaths)
 
         self.beginInsertRows(QModelIndex(), 0, len(filepaths) - 1)
         for fp in filepaths:
@@ -465,12 +566,38 @@ class MediaTableModel(QAbstractTableModel):
             self._files.append(stub)
         self.endInsertRows()
 
+        # Shard metadata reading across several concurrent persistent exiftool
+        # processes — see the MetadataBatchWorker docstring for why a single
+        # process can't use more than one CPU thread. Thumbnails finish much
+        # faster than metadata regardless of split (measured: thumbnails
+        # alone ~20-30s at full concurrency vs. metadata's 80s+), so capping
+        # metadata's share of the pool to "leave room" for thumbnails just
+        # leaves cores idle for most of the run, once thumbnails are already
+        # done, instead lets metadata use the full pool.
+        shard_count = min(self._pool.maxThreadCount(), len(filepaths))
+        shard_size  = -(-len(filepaths) // shard_count)  # ceil division
+
+        self._pending_metadata_shards = 0
+        for shard_start in range(0, len(filepaths), shard_size):
+            shard_files = filepaths[shard_start:shard_start + shard_size]
+            if not shard_files:
+                continue
+            batch_worker = MetadataBatchWorker(shard_files, generation, start_index=shard_start)
+            batch_worker.signals.chunk_ready.connect(self._on_metadata_chunk_ready)
+            batch_worker.signals.error.connect(self._on_metadata_error)
+            batch_worker.signals.finished.connect(self._on_metadata_shard_finished)
+            self._current_batch_workers.append(batch_worker)
+            self._active_workers.append(batch_worker)
+            self._pending_metadata_shards += 1
+            self._pool.start(batch_worker)
+
         for i, fp in enumerate(filepaths):
-            worker = MetadataWorker(i, fp)
-            worker.signals.file_ready.connect(self._on_file_ready)
-            worker.signals.thumb_ready.connect(self._on_thumb_ready)
-            worker.signals.finished.connect(self._on_worker_finished)
-            self._pool.start(worker)
+            is_video = Path(fp).suffix.lower() in {'.mp4', '.mov', '.avi'}
+            thumb_worker = ThumbnailWorker(i, fp, is_video, generation, self._current_generation_ref)
+            thumb_worker.signals.thumb_ready.connect(self._on_thumb_ready)
+            thumb_worker.signals.finished.connect(self._on_thumbnail_finished)
+            self._active_workers.append(thumb_worker)
+            self._pool.start(thumb_worker)
 
     def move_rows(self, indices: List[int], direction: int):
         """
@@ -786,33 +913,150 @@ class MediaTableModel(QAbstractTableModel):
 
     # ── Worker callbacks ─────────────────────────────────────────────────────
 
-    def _on_file_ready(self, index: int, mf: MediaFile):
-        """Metadata arrived for one file — update the row only."""
-        if index >= len(self._files):
-            return
-        self._files[index] = mf
-        tl = self.index(index, 0)
-        br = self.index(index, COLUMN_COUNT - 1)
-        self.dataChanged.emit(tl, br)
+    def _on_metadata_chunk_ready(self, start_index: int, results: list, generation: int):
+        """A chunk of metadata (dates, duration) arrived from one shard —
+        update those rows.
 
-    def _on_thumb_ready(self, index: int, qimage):
+        Each shard owns a disjoint, fixed range of global indices (its
+        start_index offset), and the one-time sort only happens once every
+        shard has finished — so concurrent shards never write overlapping
+        indices, and start_index is always still pre-sort here.
+        """
+        if generation != self._load_generation:
+            return
+        end = start_index
+        for i, meta in enumerate(results):
+            idx = start_index + i
+            if idx >= len(self._files):
+                break
+            old = self._files[idx]
+            self._files[idx] = MediaFile(
+                filepath             = meta['filepath'],
+                filename             = meta['filename'],
+                ext                  = meta['ext'],
+                is_video             = meta['is_video'],
+                is_already_formatted = meta['is_already_formatted'],
+                date                 = meta['date'],
+                date_source          = meta['date_source'],
+                stripped_filename    = meta['stripped_filename'],
+                duration_seconds     = meta.get('duration_seconds'),
+                thumbnail            = old.thumbnail,  # preserve if it already arrived
+            )
+            end = idx + 1
+
+        if end > start_index:
+            tl = self.index(start_index, 0)
+            br = self.index(end - 1, COLUMN_COUNT - 1)
+            self.dataChanged.emit(tl, br)
+
+        newly_fully_done = False
+        for idx in range(start_index, end):
+            if self._note_metadata_done(idx):
+                newly_fully_done = True
+        if newly_fully_done:
+            self.file_progress.emit(self._fully_done_count, self._total_files)
+
+    def _on_metadata_error(self, message: str, generation: int):
+        """exiftool couldn't start at all — surface it once, even if several
+        shards fail simultaneously. Unlike read_metadata()'s silent per-file
+        fallback, this is the one intentional behaviour change: a broken
+        exiftool.exe is no longer swallowed."""
+        if generation != self._load_generation:
+            return
+        if self._metadata_error_shown:
+            return
+        self._metadata_error_shown = True
+        self.metadata_load_error.emit(message)
+
+    def _on_metadata_shard_finished(self, generation: int):
+        """One metadata shard done (success or error). Sort, recalculate,
+        and complete the load once every shard has finished, unless still
+        waiting on thumbnails."""
+        if generation != self._load_generation:
+            return
+        self._pending_metadata_shards -= 1
+        import time
+        print(f'[DIAG] t={time.perf_counter():.2f} shard finished, {self._pending_metadata_shards} shards remaining')
+        if self._pending_metadata_shards > 0:
+            return
+        self._current_batch_workers = []
+        self._sort_by_filename()
+        self.recalculate_proposed_filenames()
+        self._metadata_finished = True
+        print(f'[DIAG] t={time.perf_counter():.2f} ALL metadata shards finished, pending_thumbnails={self._pending_thumbnails}, WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE={self.WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE}')
+        self._maybe_emit_load_complete()
+
+    def _on_thumb_ready(self, index: int, qimage, generation: int, filepath: str):
         """Thumbnail arrived as QImage — convert to QPixmap on main thread."""
-        if index >= len(self._files):
+        if generation != self._load_generation:
+            return
+        index = self._resolve_index(index, filepath)
+        if index is None:
             return
         if qimage is not None:
             self._files[index].thumbnail = QPixmap.fromImage(qimage)
         idx = self.index(index, COL_THUMB)
         self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
 
-    def _on_worker_finished(self):
-        """One worker done — sort and recalculate when all are finished."""
-        self._pending_workers -= 1
-        self.file_progress.emit(
-            self._total_workers - self._pending_workers, self._total_workers)
-        if self._pending_workers <= 0:
-            self._sort_by_filename()
-            self.recalculate_proposed_filenames()
-            self.folder_load_complete.emit()
+    def _resolve_index(self, index: int, filepath: str) -> Optional[int]:
+        """
+        A row's position can change once (the post-metadata sort in
+        _on_metadata_shard_finished, after the last shard completes) while
+        thumbnails for the same load are still arriving. Trust the given
+        index only if it still points at the expected file; otherwise fall
+        back to a linear search by filepath.
+        """
+        if 0 <= index < len(self._files) and self._files[index].filepath == filepath:
+            return index
+        for i, f in enumerate(self._files):
+            if f.filepath == filepath:
+                return i
+        return None
+
+    def _on_thumbnail_finished(self, index: int, generation: int, filepath: str):
+        if generation != self._load_generation:
+            return
+        self._pending_thumbnails -= 1
+        # The flags arrays are indexed by original (pre-sort) position, same
+        # as metadata's start_index — use the raw index here, not
+        # _resolve_index()'s current-row lookup (that's only for knowing
+        # where to write the pixmap, a separate concern from this count).
+        if self._note_thumbnail_done(index):
+            self.file_progress.emit(self._fully_done_count, self._total_files)
+        self._maybe_emit_load_complete()
+
+    def _note_metadata_done(self, index: int) -> bool:
+        """Counts a file only once it's BOTH metadata- and thumbnail-done —
+        whichever of the two events for this file arrives second is what
+        increments _fully_done_count. Returns True iff this call was the
+        second event (so the caller knows whether progress actually moved)."""
+        if index >= len(self._metadata_done_flags) or self._metadata_done_flags[index]:
+            return False
+        self._metadata_done_flags[index] = True
+        if self._thumbnail_done_flags[index]:
+            self._fully_done_count += 1
+            return True
+        return False
+
+    def _note_thumbnail_done(self, index: int) -> bool:
+        if index >= len(self._thumbnail_done_flags) or self._thumbnail_done_flags[index]:
+            return False
+        self._thumbnail_done_flags[index] = True
+        if self._metadata_done_flags[index]:
+            self._fully_done_count += 1
+            return True
+        return False
+
+    def _maybe_emit_load_complete(self):
+        if self._load_complete_emitted or not self._metadata_finished:
+            return
+        if self.WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE and self._pending_thumbnails > 0:
+            print(f'[DIAG] _maybe_emit_load_complete: waiting on thumbnails ({self._pending_thumbnails} pending)')
+            return
+        import time
+        print(f'[DIAG] EMITTING folder_load_complete now at t={time.perf_counter():.2f}, pending_thumbnails={self._pending_thumbnails}')
+        self._load_complete_emitted = True
+        self.folder_load_complete.emit()
 
     def _sort_by_filename(self):
         """Sort file list alphabetically by filename."""

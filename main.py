@@ -666,9 +666,10 @@ class MainWindow(QMainWindow):
         self._model.folder_load_complete.connect(self._on_load_complete)
         self._model.file_progress.connect(self._overlay.set_progress)
         self._model.attention_required.connect(self._on_attention_required)
+        self._model.metadata_load_error.connect(self._on_metadata_load_error)
         self._model.rename_complete.connect(self._on_rename_complete)
         self._model.phase_changed.connect(self._on_phase_changed)
-        self._model.dataChanged.connect(self._refresh_status)
+        self._model.dataChanged.connect(self._on_model_data_changed)
         self._model.layoutChanged.connect(self._refresh_status)
 
         self._table.selectionModel().selectionChanged.connect(
@@ -844,6 +845,8 @@ class MainWindow(QMainWindow):
     # ── Model callbacks ───────────────────────────────────────────────────────
 
     def _on_load_started(self, count: int):
+        import time
+        print(f'[DIAG] _on_load_started at t={time.perf_counter():.2f}, count={count}')
         self._progress.setMaximum(count)
         self._progress.setValue(0)
         self._progress.setVisible(True)
@@ -855,9 +858,19 @@ class MainWindow(QMainWindow):
         self._overlay.start()
 
     def _on_load_complete(self):
+        import time
+        print(f'[DIAG] _on_load_complete slot running at t={time.perf_counter():.2f}, calling overlay.stop()')
         self._progress.setVisible(False)
         self._overlay.stop()
         self._refresh_status()
+
+    def _on_metadata_load_error(self, message: str):
+        QMessageBox.critical(
+            self, 'Could not read file metadata',
+            'exiftool failed to start, so dates could not be read for this '
+            'folder\'s files.\n\n'
+            f'{message}\n\n'
+            'Check that vendor/exiftool.exe is present and not blocked.')
 
     def _on_attention_required(self, count: int):
         self._refresh_attention_button()
@@ -925,6 +938,18 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     # ── Status / button refresh ───────────────────────────────────────────────
+
+    def _on_model_data_changed(self, top_left, bottom_right, roles=None):
+        """dataChanged fires once per thumbnail as they load in, as well as
+        for date/rename-state changes. _refresh_status() only depends on the
+        latter (file counts, rename/flag counts — all date-driven), so a
+        thumbnail-only update (Qt.DecorationRole alone) skips it. Without
+        this, ~2000 thumbnails arriving in a burst each re-triggered
+        _refresh_status()'s O(n) scans over every file, visibly stalling the
+        UI during that phase."""
+        if roles and set(roles) == {Qt.DecorationRole}:
+            return
+        self._refresh_status()
 
     def _refresh_status(self):
         files = self._model.files()

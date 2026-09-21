@@ -13,6 +13,8 @@ The app is intentionally single-session and non-destructive — no files are tou
 - Python 3.14
 - PySide6 (UI framework)
 - Pillow (image thumbnails)
+- pillow-heif (HEIC/HEIF thumbnail decoding — registers a Pillow opener;
+  without it, `.heic`/`.heif` files silently get no thumbnail)
 - pyexiftool (metadata reading, shells out to vendor/exiftool.exe)
 - PyInstaller (packaging to .exe)
 - exiftool.exe is in `vendor/exiftool_files/` — the path is `vendor/exiftool.exe`
@@ -435,14 +437,104 @@ the right interaction in expanded mode.
 
 ### On folder load
 - Stub rows inserted immediately (filename only) so table appears instantly
-- Metadata and thumbnails loaded on worker threads, rows update progressively
-- Spinner overlay shown during load
-- On completion: sort alphabetically by filename, then `recalculate_proposed_filenames()`
+- Metadata (dates, duration) is read for all files via several concurrent
+  sharded exiftool batch calls; thumbnails are generated separately, one per
+  file, in parallel
+- Spinner overlay shown during load; hides as soon as metadata is ready
+  (thumbnails keep filling in progressively afterwards — see Threading)
+- On metadata completion: sort alphabetically by filename, then `recalculate_proposed_filenames()`
 
 ### Threading
-- One `MetadataWorker` (QRunnable) per file, each owns its own `WorkerSignals` instance
+Metadata reading and thumbnail generation are decoupled, because launching
+one `exiftool.exe` process per file was the dominant cost for large folders
+(2000+ files) — see `metadata_reader.read_metadata_batch()`. Measured on a
+real 2000-file folder (mixed photos/videos): ~209ms/file with the original
+one-process-per-file approach (~418s sequential, ~87.5s with the old
+per-file worker's 16-way concurrency), vs. the current design's ~65s to
+`folder_load_complete` and ~82s for everything including thumbnails.
+
+- **Metadata is sharded, not read by a single worker**: a lone
+  `MetadataBatchWorker` running one persistent exiftool process for all
+  files has *no internal parallelism* — it parses files one at a time
+  regardless of free CPU threads, and measured **slower** (~270s) than the
+  old one-process-per-file approach's 16-way concurrency, because it trades
+  away that concurrency for reduced process-launch overhead and loses more
+  than it gains. `load_folder()` instead splits the file list into
+  `min(pool.maxThreadCount(), file_count)` shards, each its own
+  `MetadataBatchWorker` with its own persistent exiftool process
+  (`start_index` offset so `chunk_ready` reports correct global row
+  indices) — this recovers full parallelism while still avoiding one
+  exiftool launch per file. Shards use the *full* thread pool rather than
+  a fraction reserved for thumbnails: thumbnails finish much faster than
+  metadata regardless of split (measured ~20-30s vs. metadata's 65s+), so
+  reserving capacity for them for the whole run just leaves cores idle
+  once thumbnails are already done.
+- Each `MetadataBatchWorker` shard calls `read_metadata_batch()`, which
+  reads its slice of files (including video duration, via the
+  `QuickTime:Duration` tag) in chunks of `METADATA_CHUNK_SIZE` (100).
+  Chunking is for progress reporting and cancellation, not command-line
+  length — pyexiftool sends arguments over stdin. Emits `chunk_ready` after
+  each chunk so rows update progressively rather than all at once at the end.
+  If exiftool can't start at all, this raises once per shard and the UI
+  shows one error dialog (`MediaTableModel.metadata_load_error`, deduped
+  across shards) — unlike `read_metadata()`'s single-file path, which
+  silently falls back to date-modified for that one file. The load
+  completes (sort + `recalculate_proposed_filenames()`) once every shard's
+  `finished` signal has arrived (`_pending_metadata_shards` counter).
+- **Thumbnails**: one `ThumbnailWorker` (QRunnable) per file, still parallel
+  across the thread pool, generating a thumbnail (and, for video, extracting
+  a frame via ffmpeg) — decoupled from metadata so a video-heavy folder
+  doesn't serialize thumbnail generation behind (or in front of) the
+  metadata batch. Deliberately still eager (not limited to visible rows) —
+  see "Lazy thumbnail loading" in Future features for why this wasn't taken
+  further.
+- Each worker owns its own signals instance (`BatchSignals` /
+  `ThumbnailSignals`).
+- **`MediaTableModel._active_workers` is a permanent keep-alive registry,
+  not an oversight to clean up**: `QThreadPool.start()` does not keep a
+  Python reference to the runnable it's given. Once `run()` returns,
+  nothing stops the GC from collecting the worker — and its unparented
+  `signals` QObject along with it — before a still-queued cross-thread
+  signal emission has been delivered to the main thread, which surfaces as
+  `RuntimeError: Signal source has been deleted` and silently drops
+  whatever that emit carried (observed dropping ~1200 of 2000 thumbnails
+  before this was found). This is a real PySide6 gotcha, not specific to
+  this codebase, and it predates the batching work — the original
+  `MetadataWorker` had the same unguarded pattern; it just wasn't
+  triggered reliably until sharding made completion fast enough to expose
+  the race. Every worker is appended to `_active_workers` before
+  `_pool.start()` and the list is *never* cleared on reload — an old
+  generation's worker may still be mid-`run()` when a new load starts
+  (`cancel()` only stops new work from starting, it doesn't interrupt
+  in-flight work), so dropping references early would reintroduce the same
+  race. The list keeps every worker from every load alive for the life of
+  the model; the per-load `_load_generation` check in the callbacks is
+  what makes stale results inert, not removal from this list.
 - `QImage` created on worker thread, converted to `QPixmap` on main thread in `_on_thumb_ready`
-- `folder_load_complete` emitted only after all workers finish
+- **Cancel-on-reload**: `load_folder()` bumps `_load_generation` on every
+  call. Workers carry the generation they were created with; a superseded
+  worker's results are dropped by the generation check in the callbacks
+  (`_on_metadata_chunk_ready`, `_on_thumb_ready`, etc.) instead of being
+  spliced into the new folder's rows. In-flight work isn't interrupted
+  (a chunk in progress can't be cancelled mid-call, and a running
+  `ThumbnailWorker` finishes its current file) — cancellation only stops
+  work from *starting* for the old generation.
+- **`folder_load_complete` timing is a deliberate trade-off, not the
+  simplest option**: it fires once metadata is fully read and
+  `recalculate_proposed_filenames()` has run, without waiting for
+  thumbnails — `MediaTableModel.WAIT_FOR_THUMBNAILS_BEFORE_COMPLETE` (class
+  constant, default `False`) controls this. This is what makes the
+  batching speedup visible: thumbnail generation (image decode + ffmpeg
+  frame extraction) is the larger remaining cost for big folders, so
+  gating the spinner on it would hide the improvement. Set the constant to
+  `True` to restore the pre-batching behaviour of waiting for every
+  thumbnail too.
+- Thumbnails are matched back to their row by filepath, not just index
+  (`_resolve_index`): the one-time sort in `_on_metadata_shard_finished`
+  (once every shard has finished) can reorder rows while thumbnails for
+  that same load are still arriving (e.g. mixed-case original filenames
+  sort differently case-sensitive vs. case-insensitive), so a thumbnail's
+  original dispatch index can go stale mid-load.
 
 ### Dialog styling
 All `QMessageBox` dialogs are styled globally via `app.setStyleSheet()` in
@@ -463,9 +555,13 @@ Key styles applied:
 
 ```python
 folder_load_started = Signal(int)       # file count
-folder_load_complete = Signal()
+folder_load_complete = Signal()         # fires once metadata is ready — see Threading
+file_progress = Signal(int, int)        # done, total (metadata chunk progress)
 attention_required = Signal(int)        # count of files needing attention
+rename_progress = Signal(int, int)      # done, total
 rename_complete = Signal(int, int)      # success_count, error_count
+phase_changed = Signal(bool)            # True = Phase 1, False = Phase 2
+metadata_load_error = Signal(str)       # exiftool could not start at all
 ```
 
 ---
@@ -477,11 +573,20 @@ rename_complete = Signal(int, int)      # success_count, error_count
 - Undo/redo
 - Mac support (same codebase, build on Mac)
 - AI-assisted ordering suggestion for undated files (vision API)
+- Lazy thumbnail loading (only visible rows) — deferred; thumbnail
+  generation is eager today (see Threading) and, for very large or
+  video-heavy folders, contends for CPU with the metadata batch read while
+  it's in flight. Viewport-based lazy loading would remove that contention
+  and cut initial load time further, but was deliberately not taken on
+  alongside the exiftool-batching work to avoid adding viewport-tracking
+  complexity in the same change.
 
 ---
 
 ## What's done
-- `metadata_reader.py` — tested and working
+- `metadata_reader.py` — tested and working; metadata reading is batched
+  (`read_metadata_batch()`) so large folders launch one exiftool process
+  instead of one per file — see Threading
 - `media_model.py` — MediaFile dataclass + MediaTableModel, full five-state logic with user_moved, effective_date, interpolation, apply_rename
 - `main.py` — main window, toolbar, table view, all delegates, loading overlay, selection retention on move
 
