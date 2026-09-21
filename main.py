@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from media_model import (
-    MediaTableModel, MediaFile,
+    MediaTableModel, MediaFile, HEIF_AVAILABLE,
     COL_CHECK, COL_ORDER, COL_FILENAME, COL_DATE,
     COL_PREVIEW, COL_THUMB, COL_MOVE,
     MediaFileRole, DateSourceRole,
@@ -495,6 +495,8 @@ class MediaTableView(QTableView):
 # ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
+    _heif_warned = False  # set once the missing-pillow-heif dialog has been shown
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Media Reel')
@@ -893,6 +895,22 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(False)
         self._overlay.stop()
         self._refresh_status()
+
+        # Once per session, and only when it matters: the folder has HEIC
+        # files but pillow-heif isn't installed, so they'll have no
+        # thumbnails. Deferred so the dialog doesn't run a nested event loop
+        # inside the model's signal emission.
+        if (not HEIF_AVAILABLE and not self._heif_warned
+                and any(f.ext in ('.heic', '.heif') for f in self._model.files())):
+            self._heif_warned = True
+            QTimer.singleShot(0, self._warn_heif_missing)
+
+    def _warn_heif_missing(self):
+        QMessageBox.warning(
+            self, 'HEIC thumbnails unavailable',
+            'This folder contains HEIC/HEIF files, but the pillow-heif '
+            'package is not installed, so they will not have thumbnails.\n\n'
+            'Install it with:\n    pip install -r requirements.txt')
 
     def _on_thumbnails_complete(self):
         self._thumb_pulse_timer.stop()

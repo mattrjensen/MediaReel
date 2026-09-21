@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,11 +32,19 @@ from metadata_reader import (
     DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED
 )
 
+# Without pillow-heif, Pillow can't open .heic/.heif files and their
+# thumbnails silently fail. Warn at import (visible in a console run) and
+# expose the flag so the UI can tell the user (see MainWindow).
+HEIF_AVAILABLE = False
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
+    HEIF_AVAILABLE = True
 except ImportError:
-    pass
+    warnings.warn(
+        'pillow-heif is not installed: .heic/.heif files will have no '
+        'thumbnails. Install it with: pip install -r requirements.txt',
+        RuntimeWarning)
 
 # ── Column indices ──────────────────────────────────────────────────────────
 COL_CHECK    = 0

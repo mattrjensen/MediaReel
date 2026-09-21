@@ -15,8 +15,10 @@ The app is intentionally single-session and non-destructive — no files are tou
 - Pillow (image thumbnails)
 - pillow-heif (HEIC/HEIF thumbnail decoding — registers a Pillow opener;
   without it, `.heic`/`.heif` files silently get no thumbnail. Listed in
-  `requirements.txt`; `media_model.py` imports it in a `try/except
-  ImportError`, so a missing install fails silently rather than loudly)
+  `requirements.txt`. `media_model.py` imports it in a `try/except
+  ImportError`: if it's missing, it emits a `RuntimeWarning`, sets
+  `HEIF_AVAILABLE = False`, and `MainWindow` shows a one-time dialog when a
+  loaded folder contains HEIC files)
 - pyexiftool (metadata reading, shells out to vendor/exiftool.exe)
 - PyInstaller (packaging to .exe)
 - exiftool.exe is in `vendor/exiftool_files/` — the path is `vendor/exiftool.exe`
