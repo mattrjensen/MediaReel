@@ -97,6 +97,15 @@ DURATION_TAG = 'QuickTime:Duration'
 
 METADATA_CHUNK_SIZE = 100
 
+# exiftool's JSON output is UTF-8, but pyexiftool decodes it with the
+# platform default (cp1252 on Windows) unless told otherwise. A single
+# non-ASCII byte in any file's metadata (lens names, descriptions, maker
+# notes) then raised UnicodeDecodeError for the whole call — for a batch,
+# the whole 100-file chunk, which fell back to one exiftool launch per file
+# (~200ms each); for read_metadata(), that file silently lost its metadata
+# date and fell through to filename / date modified.
+EXIFTOOL_ENCODING = 'utf-8'
+
 
 def _new_result(filepath: str) -> dict:
     path = Path(filepath)
@@ -149,7 +158,7 @@ def read_metadata(filepath: str) -> dict:
     exiftool_path = _vendor_path('exiftool.exe')
 
     try:
-        with exiftool.ExifToolHelper(executable=str(exiftool_path)) as et:
+        with exiftool.ExifToolHelper(executable=str(exiftool_path), encoding=EXIFTOOL_ENCODING) as et:
             tags = et.get_metadata(filepath)[0]
             dt = _date_from_tags(tags)
             if dt:
@@ -197,7 +206,7 @@ def read_metadata_batch(
     results: List[Optional[dict]] = [None] * len(filepaths)
     exiftool_path = _vendor_path('exiftool.exe')
 
-    with exiftool.ExifToolHelper(executable=str(exiftool_path)) as et:
+    with exiftool.ExifToolHelper(executable=str(exiftool_path), encoding=EXIFTOOL_ENCODING) as et:
         done = 0
         for start in range(0, len(filepaths), METADATA_CHUNK_SIZE):
             if is_cancelled and is_cancelled():
