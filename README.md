@@ -80,7 +80,8 @@ git clone https://github.com/yourusername/mediareel.git
 cd mediareel
 python -m venv venv
 venv\Scripts\activate
-pip install PySide6 Pillow pyexiftool PyInstaller
+pip install -r requirements.txt
+pip install PyInstaller   # only needed to build the .exe
 ```
 
 Place `exiftool.exe` and its `exiftool_files/` folder in `vendor/`.
@@ -108,6 +109,7 @@ MediaReel/
     metadata_reader.py    # metadata reading and filename logic
     assets/               # icons and images
     tests/                # automated tests and diagnostic scripts
+    requirements.txt      # pinned runtime dependencies
     vendor/               # exiftool.exe + exiftool_files/, ffmpeg.exe (not in repo)
     CLAUDE.md             # full design spec and decisions
     DEVELOPMENT.md        # how to run, build, and test
@@ -138,7 +140,8 @@ MVP — actively used and tested on real event photo collections.
 - Five-state file classification
 - Live filename preview
 - Apply rename with resort
-- Thumbnail generation (photos and video via ffmpeg)
+- Fast metadata loading — a 2000-file folder's dates are read in a few seconds and the UI is usable straight away
+- Thumbnail generation (photos, HEIC and video via ffmpeg), loading in the background with a pulsing "Loading…" placeholder
 - Hold-to-repeat move buttons
 - Expand/compact view toggle
 - Thumbnail click to open in default app

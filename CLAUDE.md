@@ -14,7 +14,9 @@ The app is intentionally single-session and non-destructive — no files are tou
 - PySide6 (UI framework)
 - Pillow (image thumbnails)
 - pillow-heif (HEIC/HEIF thumbnail decoding — registers a Pillow opener;
-  without it, `.heic`/`.heif` files silently get no thumbnail)
+  without it, `.heic`/`.heif` files silently get no thumbnail. Listed in
+  `requirements.txt`; `media_model.py` imports it in a `try/except
+  ImportError`, so a missing install fails silently rather than loudly)
 - pyexiftool (metadata reading, shells out to vendor/exiftool.exe)
 - PyInstaller (packaging to .exe)
 - exiftool.exe is in `vendor/exiftool_files/` — the path is `vendor/exiftool.exe`
@@ -30,7 +32,13 @@ MediaReel/
     metadata_reader.py    ← done and tested
     media_model.py        ← done
     main.py               ← done
+    tests/                ← pytest tests (test_*.py) + standalone diagnostic_*.py scripts
+    assets/               ← icons and images
+    requirements.txt      ← pinned runtime dependencies (incl. pillow-heif)
+    MediaReel.spec        ← PyInstaller spec
     CLAUDE.md             ← this file
+    DEVELOPMENT.md        ← how to run, build, and test
+    README.md             ← GitHub readme
 ```
 
 ## Supported file types
@@ -381,7 +389,7 @@ runs. No user action needed beyond clicking Apply rename.
 
 ### Row height toggle state
 - Default: `self._expanded = False`
-- `MetadataWorker.THUMB_W = 160`, `MetadataWorker.THUMB_H = 120` — always load at full size
+- `ThumbnailWorker.THUMB_W = 160`, `ThumbnailWorker.THUMB_H = 120` — always load at full size
 - Compact display: scale to 80x60 in delegate
 - Expanded display: scale to 160x120 in delegate
 
@@ -620,12 +628,12 @@ metadata_load_error = Signal(str)       # exiftool could not start at all
 - Mac support (same codebase, build on Mac)
 - AI-assisted ordering suggestion for undated files (vision API)
 - Lazy thumbnail loading (only visible rows) — deferred; thumbnail
-  generation is eager today (see Threading) and, for very large or
-  video-heavy folders, contends for CPU with the metadata batch read while
-  it's in flight. Viewport-based lazy loading would remove that contention
-  and cut initial load time further, but was deliberately not taken on
-  alongside the exiftool-batching work to avoid adding viewport-tracking
-  complexity in the same change.
+  generation is eager today (see Threading). With metadata now reading in a
+  few seconds, thumbnails are the dominant cost of a load (~54s of the
+  ~54s total for 2000 files), so this is the main remaining lever for load
+  time. It was deliberately not taken on alongside the exiftool-batching
+  work to avoid adding viewport-tracking complexity in the same change; the
+  pulsing "Loading…" placeholder covers the wait in the meantime.
 
 ---
 

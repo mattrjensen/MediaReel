@@ -1,0 +1,9 @@
+# Runtime dependencies. Versions are the ones the app is developed and
+# tested against (Python 3.14, Windows). Build and test tools are separate:
+#   pip install pyinstaller pytest
+PySide6==6.11.1
+Pillow==12.3.0
+# HEIC/HEIF thumbnail decoding. Without it .heic/.heif files silently get no
+# thumbnail.
+pillow-heif==1.7.0
+PyExifTool==0.5.6
