@@ -67,7 +67,10 @@ def time_app_load(folder: str):
 
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else r'D:\Pictures\2025'
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    folder = sys.argv[1]
     filepaths = collect_files(folder)
     print(f'Folder: {folder}')
     print(f'Files:  {len(filepaths)}')

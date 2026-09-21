@@ -1,34 +1,63 @@
 """
-Verify step 3: compare old read_metadata() (frozen scratch snapshot) against
-the refactored read_metadata() and the new read_metadata_batch() over the
-same real folder. Any difference in date/date_source/proposed filename is a
-bug unless explained.
+Compare the original one-process-per-file read_metadata() against the current
+read_metadata() and read_metadata_batch() over the same real folder. Any
+difference in date / date_source / proposed filename is a bug unless
+explained.
 
-Not a pytest test — run directly: python tests/diagnostic_batch_diff.py <folder>
+Not a pytest test — run directly:
+
+    python tests/diagnostic_batch_diff.py <folder> [original_metadata_reader.py]
+
+The original implementation is taken from the last commit before batching
+(ORIGINAL_COMMIT) via `git show`, unless a path to a copy is given.
+
+Expected differences: the original decoded exiftool output as cp1252, so a
+file with non-ASCII metadata silently lost its metadata date and fell back to
+its filename date; the current code decodes as UTF-8. Those files show the
+same date but a different date_source ('filename' -> 'metadata').
 """
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-SNAPSHOT_PATH = (
-    r'C:\Users\MATTJE~1\AppData\Local\Temp\claude\d--Documents-Work-Projects-MediaReel'
-    r'\d8678866-1774-4e94-9457-d9de1554b49b\scratchpad\metadata_reader_baseline_snapshot.py'
-)
+# Last commit before batched metadata reading was introduced.
+ORIGINAL_COMMIT = '216042b'
 
-spec = importlib.util.spec_from_file_location('metadata_reader_old', SNAPSHOT_PATH)
-old_mr = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(old_mr)
+
+def load_original_module(snapshot_path=None):
+    """Import the pre-batching metadata_reader as a separate module."""
+    if snapshot_path is None:
+        source = subprocess.run(
+            ['git', 'show', f'{ORIGINAL_COMMIT}:metadata_reader.py'],
+            cwd=PROJECT_ROOT, capture_output=True, encoding='utf-8', check=True,
+        ).stdout
+        tmp = tempfile.NamedTemporaryFile(
+            'w', suffix='.py', delete=False, encoding='utf-8')
+        tmp.write(source)
+        tmp.close()
+        snapshot_path = tmp.name
+
+    spec = importlib.util.spec_from_file_location('metadata_reader_old', snapshot_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 import metadata_reader as new_mr
 from metadata_reader import build_new_filename, SUPPORTED_EXTENSIONS
 
-# The snapshot module's _vendor_path() resolves relative to its own __file__,
-# which is the scratchpad directory, not the project root — so it would
-# never find the real vendor/exiftool.exe and would silently fall back to
-# filename parsing for every file. Point it at the real resolver instead.
+old_mr = load_original_module(sys.argv[2] if len(sys.argv) > 2 else None)
+
+# The original module's _vendor_path() resolves relative to its own
+# __file__ (a temp file), not the project root — so it would never find the
+# real vendor/exiftool.exe and would silently fall back to filename parsing
+# for every file. Point it at the real resolver instead.
 old_mr._vendor_path = new_mr._vendor_path
 
 
@@ -41,7 +70,10 @@ def collect_files(folder: str):
 
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else r'D:\Pictures\2025'
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    folder = sys.argv[1]
     filepaths = collect_files(folder)
     print(f'Folder: {folder}')
     print(f'Files:  {len(filepaths)}')

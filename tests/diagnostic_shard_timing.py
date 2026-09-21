@@ -39,7 +39,10 @@ def run_sharded(filepaths, n_shards: int):
 
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else r'D:\Pictures\2025'
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    folder = sys.argv[1]
     shard_counts = [int(x) for x in sys.argv[2:]] or [4, 8, 16]
 
     filepaths = collect_files(folder)

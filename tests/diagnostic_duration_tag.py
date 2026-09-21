@@ -14,7 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import exiftool
 from metadata_reader import _vendor_path
 
-folder = Path(sys.argv[1] if len(sys.argv) > 1 else r'D:\Pictures\2025')
+if len(sys.argv) < 2:
+    print(__doc__)
+    print('Usage: python tests/diagnostic_duration_tag.py <folder>')
+    sys.exit(1)
+folder = Path(sys.argv[1])
 videos = sorted([str(f) for f in folder.iterdir() if f.suffix.lower() in ('.mp4', '.mov')])[:6]
 
 exiftool_path = _vendor_path('exiftool.exe')
