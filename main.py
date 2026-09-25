@@ -4,13 +4,15 @@ import math
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    Qt, QSize, QRect, QEvent, QTimer, QRectF, QStandardPaths, Signal
+    Qt, QSize, QRect, QEvent, QTimer, QRectF, QStandardPaths, Signal,
+    QDate, QPersistentModelIndex
 )
 from PySide6.QtGui import (
-    QColor, QPainter, QPen, QPixmap, QImage, QPalette
+    QColor, QPainter, QPen, QPixmap, QImage, QPalette, QFontMetrics
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -18,7 +20,8 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QStatusBar, QPushButton,
     QFileDialog, QMessageBox, QProgressDialog, QStyledItemDelegate,
     QStyleOptionViewItem, QStyleOptionButton, QProgressBar, QStyle,
-    QSizePolicy
+    QSizePolicy, QLineEdit, QCalendarWidget, QDialog, QHBoxLayout,
+    QListWidget, QListWidgetItem
 )
 
 from media_model import (
@@ -54,40 +57,53 @@ SOURCE_BADGE = {
     'date modified': ('#FEF3C7', '#92400E'),
     'interpolated':  ('#FED7AA', '#9A3412'),
     'none':          ('#FEE2E2', '#991B1B'),
+    'manual':        ('#EDE9FE', '#5B21B6'),
 }
 
 
 # ── Base delegate ─────────────────────────────────────────────────────────────
 class BaseDelegate(QStyledItemDelegate):
 
-    _is_phase1: bool = False
-
-    def set_phase1(self, is_phase1: bool):
-        self._is_phase1 = is_phase1
-
     def _draw_bg(self, painter: QPainter, option, f: MediaFile = None):
+        # Amber marks "needs a decision" (weak, unmoved, no value) — every
+        # other row, hard anchor or not, gets the plain alternating
+        # background; the New filename box's own colour/contents already
+        # say whether it'll be renamed.
         alt = bool(option.features & QStyleOptionViewItem.Alternate)
-        if f is None or f.is_already_formatted:
-            painter.fillRect(option.rect, QColor('#FAFAFA' if alt else '#FFFFFF'))
-            return
-        is_weak = f.date_source in ('date modified', 'none')
-        if self._is_phase1:
-            if is_weak:
-                painter.fillRect(option.rect, QColor('#EEEEEE' if alt else '#F3F4F6'))
-            else:
-                painter.fillRect(option.rect, QColor('#FFFBEB' if alt else '#FEF3C7'))
+        if f is not None and f.needs_attention:
+            painter.fillRect(option.rect, QColor('#FFFBEB' if alt else '#FEF3C7'))
         else:
-            if is_weak:
-                painter.fillRect(option.rect, QColor('#FFFBEB' if alt else '#FEF3C7'))
-            else:
-                painter.fillRect(option.rect, QColor('#FAFAFA' if alt else '#FFFFFF'))
+            painter.fillRect(option.rect, QColor('#FAFAFA' if alt else '#FFFFFF'))
 
     def sizeHint(self, option, index):
         return QSize(super().sizeHint(option, index).width(), ROW_H)
 
 
 # ── Preview delegate ──────────────────────────────────────────────────────────
+# Cells are custom-painted to look like a text input (bordered box, fixed
+# ~40px height regardless of row height) rather than given a real,
+# always-present QLineEdit per row — with up to 2000 rows, that many live
+# widgets would be a real performance cost. A real QLineEdit is only
+# created on demand for the one cell being edited. Unlike a normal Qt
+# delegate, that editor opens on a plain single click anywhere in the box
+# (MediaTableView.mousePressEvent calls edit() directly; see the class
+# comment there for why this isn't done via editTriggers) — the point is
+# for it to behave like a native input field, not a table cell that
+# happens to support editing.
 class PreviewDelegate(BaseDelegate):
+
+    _ICON_SIZE = 28
+    _BOX_H     = 40
+
+    def _box_rect(self, option) -> QRect:
+        h = self._BOX_H
+        y = option.rect.y() + max(0, (option.rect.height() - h) // 2)
+        return QRect(option.rect.x() + 6, y, option.rect.width() - 12, h)
+
+    def _reset_icon_rect(self, option) -> QRect:
+        box = self._box_rect(option)
+        s = self._ICON_SIZE
+        return QRect(box.right() - s - 6, box.center().y() - s // 2, s, s)
 
     def paint(self, painter: QPainter, option, index):
         f: MediaFile = index.data(MediaFileRole)
@@ -98,22 +114,124 @@ class PreviewDelegate(BaseDelegate):
         painter.save()
         self._draw_bg(painter, option, f)
 
-        if f.proposed_filename == f.filename or f.proposed_filename.startswith('---'):
+        if f.is_already_formatted:
+            # Hard anchor — not editable, filename is already the source of
+            # truth, so nothing will change. Left empty rather than
+            # repeating the Filename column's value: this column means
+            # "what will this become," and repeating the current name under
+            # that header reads as a rename that isn't actually happening.
+            painter.restore()
+            return
+
+        name         = f.display_filename
+        has_override = f.manual_filename is not None
+
+        # Input-box chrome. Blue border signals "you edited this"; grey is
+        # the default, still-editable-but-untouched look.
+        box = self._box_rect(option)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor('#FFFFFF'))
+        painter.setPen(QPen(QColor('#93C5FD' if has_override else '#E5E7EB'), 1))
+        painter.drawRoundedRect(box, 4, 4)
+
+        if name == f.filename or name.startswith('---'):
             colour = CLR_NO_CHANGE
         else:
             colour = CLR_DERIVED
 
+        # Clear icon — shown only when the box holds a real name that can
+        # be cleared (MediaFile.can_clear_filename, the same test the click
+        # handler in MediaTableView.mousePressEvent uses, so an unpainted
+        # icon can't be clicked). Clicking sends '' to the model, which
+        # blanks the field (skip this file on Apply) — except on a strong
+        # anchor still waiting to be renamed, which must always have a
+        # name, so there it puts the metadata-derived one back.
+        show_reset = f.can_clear_filename
+
+        text_rect = box.adjusted(10, 0, -((self._ICON_SIZE + 14) if show_reset else 10), 0)
         painter.setPen(colour)
-        rect = option.rect.adjusted(8, 0, -8, 0)
-        painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft,
-                         f.proposed_filename)
+        fm = painter.fontMetrics()
+        elided = fm.elidedText(name, Qt.ElideMiddle, max(0, text_rect.width()))
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+
+        if show_reset:
+            # No background — just the glyph, sized to fill the (large, easy
+            # to hit) icon rect rather than sitting small inside it.
+            icon = self._reset_icon_rect(option)
+            glyph_font = painter.font()
+            glyph_font.setPixelSize(round(self._ICON_SIZE * 0.75))
+            painter.setFont(glyph_font)
+            painter.setPen(QColor('#6B7280'))
+            painter.drawText(icon, Qt.AlignCenter, '×')
+
         painter.restore()
+
+    def createEditor(self, parent, option, index):
+        f: MediaFile = index.data(MediaFileRole)
+        if f is None or f.is_already_formatted:
+            return None
+        editor = QLineEdit(parent)
+        # Match the painted box's look so opening the editor doesn't cause
+        # a visible jump — see updateEditorGeometry for the matching size.
+        editor.setStyleSheet('''
+            QLineEdit {
+                border: 1px solid #93C5FD;
+                border-radius: 4px;
+                padding: 0 10px;
+                background: #FFFFFF;
+            }
+        ''')
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(self._box_rect(option))
+
+    def setEditorData(self, editor, index):
+        f: MediaFile = index.data(MediaFileRole)
+        text = f.display_filename if f else ''
+        editor.setText(text)
+        # Pre-select just the stem, Explorer-rename style, so a normal
+        # type-to-replace doesn't clobber the extension by accident.
+        editor.setSelection(0, len(Path(text).stem))
+
+    def setModelData(self, editor, model, index):
+        # Always the literal typed text, including '' — an explicitly
+        # emptied field means "skip this file on Apply" (see
+        # MediaTableModel.set_manual_filename), the same as clicking the
+        # reset icon on a non-empty field.
+        model.setData(index, editor.text().strip(), Qt.EditRole)
 
 
 # ── Date delegate ─────────────────────────────────────────────────────────────
 class DateDelegate(BaseDelegate):
 
-    BADGE_H = 15
+    BADGE_H    = 15
+    _ICON_SIZE = 14
+    _expanded: bool = False  # see ThumbnailDelegate — same class-attribute-default pattern
+
+    def set_expanded(self, expanded: bool):
+        self._expanded = expanded
+
+    def _calendar_icon_rect(self, option) -> QRect:
+        s = self._ICON_SIZE
+        return QRect(option.rect.right() - s - 8, option.rect.center().y() - s // 2, s, s)
+
+    def _draw_calendar_icon(self, painter: QPainter, rect: QRect, color: QColor):
+        """Drawn with primitives, not a text/emoji glyph, so it renders in a
+        single flat colour consistent with the rest of the app's icons
+        (e.g. the play triangle) instead of risking a forced-colour emoji
+        presentation for a Unicode calendar character."""
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(color, 1.3)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        body = rect.adjusted(0, 2, 0, 0)
+        painter.drawRoundedRect(body, 2, 2)
+        painter.drawLine(body.left(), body.top() + 3, body.right(), body.top() + 3)
+        painter.drawLine(body.left() + 3, rect.top(), body.left() + 3, body.top() + 4)
+        painter.drawLine(body.right() - 3, rect.top(), body.right() - 3, body.top() + 4)
+        painter.restore()
 
     def paint(self, painter: QPainter, option, index):
         f: MediaFile = index.data(MediaFileRole)
@@ -124,41 +242,54 @@ class DateDelegate(BaseDelegate):
         painter.save()
         self._draw_bg(painter, option, f)
 
-        # Source badge — drawn first, at top
+        # Source badge — drawn first
         source = ('interpolated'
                   if (f.is_interpolated or f.is_re_anchored)
                   else f.date_source)
-        if self._is_phase1 and source in ('date modified', 'none'):
-            bg_hex, fg_hex = '#E5E7EB', '#6B7280'
-        else:
-            bg_hex, fg_hex = SOURCE_BADGE.get(source, SOURCE_BADGE['none'])
+        bg_hex, fg_hex = SOURCE_BADGE.get(source, SOURCE_BADGE['none'])
 
         small = painter.font()
         small.setPointSize(max(7, small.pointSize() - 2))
-        painter.setFont(small)
-        fm = painter.fontMetrics()
+        badge_fm = QFontMetrics(small)
         pad = 6
-        bw = fm.horizontalAdvance(source) + pad * 2
+        bw = badge_fm.horizontalAdvance(source) + pad * 2
         bh = self.BADGE_H
-        bx = option.rect.x() + 8
-        by = option.rect.y() + 8
 
+        # Badge + gap + one line of date text, as a block. Top-aligned in
+        # compact mode (68px rows leave little room to spare anyway);
+        # vertically centred in expanded mode (140px rows), where top
+        # alignment left a lot of dead space below the date.
+        date_gap  = 2
+        content_h = bh + date_gap + QFontMetrics(option.font).height()
+        if self._expanded:
+            by = option.rect.y() + max(4, (option.rect.height() - content_h) // 2)
+        else:
+            by = option.rect.y() + 8
+        bx = option.rect.x() + 8
+
+        painter.setFont(small)
         painter.setBrush(QColor(bg_hex))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(bx, by, bw, bh, 3, 3)
         painter.setPen(QColor(fg_hex))
         painter.drawText(bx, by, bw, bh, Qt.AlignCenter, source)
 
-        # Date text — below badge
+        # Date text — below badge, leaving room for the calendar icon. Shown
+        # on every row, including hard anchors: the date it was renamed
+        # with can itself be wrong (WhatsApp/iOS share-date metadata), and
+        # this is the only way back — see MediaTableModel.set_manual_date.
         date_str = index.data(Qt.DisplayRole) or ''
+        icon_allowance = self._ICON_SIZE + 14
         painter.setPen(QColor('#111827'))
         painter.setFont(option.font)
-        date_y = by + bh + 2
+        date_y = by + bh + date_gap
         painter.drawText(
             option.rect.x() + 8, date_y,
-            option.rect.width() - 16,
+            option.rect.width() - 16 - icon_allowance,
             option.rect.bottom() - date_y - 4,
             Qt.AlignTop | Qt.AlignLeft, date_str)
+
+        self._draw_calendar_icon(painter, self._calendar_icon_rect(option), QColor('#6B7280'))
 
         painter.restore()
 
@@ -176,8 +307,7 @@ class ThumbnailDelegate(BaseDelegate):
         self._expanded = expanded
 
     def editorEvent(self, event, model, option, index):
-        if (self._expanded and
-                event.type() == QEvent.MouseButtonRelease):
+        if event.type() == QEvent.MouseButtonDblClick:
             f: MediaFile = index.data(MediaFileRole)
             if f and f.filepath:
                 self.open_file_requested.emit(f.filepath)
@@ -463,9 +593,218 @@ class LoadingOverlay(QWidget):
 
 
 # ── Table view with row-border selection ─────────────────────────────────────
+# ── Date/time picker popup ────────────────────────────────────────────────────
+# Opened straight from the calendar icon in the Date taken cell — the cell
+# itself never turns into an input. A calendar for the date, and Hour / Min /
+# Sec columns you click to pick the time (a typed time field would be no
+# better than typing the filename, which is what this is meant to spare
+# you). Qt.Popup makes it close on any click outside it (and on Escape).
+class DateTimePickerPopup(QDialog):
+
+    committed = Signal(object)   # a python datetime
+
+    def __init__(self, initial: datetime, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        # The app palette's Highlight is a very pale blue (fine for table
+        # rows, too faint to show what's picked), so selections get the
+        # app's solid blue.
+        self.setStyleSheet(
+            'QDialog { background: #FFFFFF; border: 1px solid #D1D5DB; } '
+            'QCalendarWidget QAbstractItemView:enabled { '
+            'selection-background-color: #2563EB; selection-color: #FFFFFF; } '
+            'QListWidget { border: 1px solid #E5E7EB; border-radius: 4px; outline: none; } '
+            'QListWidget::item { height: 22px; padding: 0px; } '
+            'QListWidget::item:hover { background: #EFF6FF; } '
+            'QListWidget::item:selected { background: #2563EB; color: #FFFFFF; }')
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        body = QHBoxLayout()
+        body.setSpacing(10)
+
+        self._calendar = QCalendarWidget()
+        self._calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self._calendar.setSelectedDate(QDate(initial.year, initial.month, initial.day))
+        body.addWidget(self._calendar)
+
+        self._hours   = self._time_column(24, initial.hour)
+        self._minutes = self._time_column(60, initial.minute)
+        self._seconds = self._time_column(60, initial.second)
+        for title, column in (('Hour', self._hours), ('Min', self._minutes),
+                              ('Sec', self._seconds)):
+            box = QVBoxLayout()
+            box.setSpacing(4)
+            label = QLabel(title)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet('color: #6B7280; font-size: 11px;')
+            box.addWidget(label)
+            box.addWidget(column)
+            body.addLayout(box)
+        outer.addLayout(body)
+
+        # What "Set date and time" will apply — no guessing from highlights.
+        self._summary = QLabel()
+        self._summary.setStyleSheet('color: #111827; font-weight: 600;')
+        outer.addWidget(self._summary)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton('Cancel')
+        cancel.setStyleSheet(
+            'QPushButton { background: #FFFFFF; border: 1px solid #D1D5DB; '
+            'border-radius: 6px; padding: 6px 12px; } '
+            'QPushButton:hover { background: #F3F4F6; }')
+        cancel.clicked.connect(self.close)
+        ok = QPushButton('Set date and time')
+        ok.setStyleSheet(
+            'QPushButton { background: #2563EB; color: #FFFFFF; border: none; '
+            'border-radius: 6px; padding: 6px 12px; font-weight: 600; } '
+            'QPushButton:hover { background: #1D4ED8; }')
+        ok.setDefault(True)
+        ok.clicked.connect(self._commit)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        outer.addLayout(buttons)
+
+        self._ok_button = ok
+        self._calendar.selectionChanged.connect(self._update_summary)
+        self._update_summary()
+
+    def _time_column(self, count: int, selected: int) -> QListWidget:
+        """A scrollable column of 00..count-1 to click. The row index IS the
+        value, so currentRow() reads it back directly."""
+        column = QListWidget()
+        column.setFixedWidth(52)
+        # Gap between rows, not a taller item box — the row height only needs
+        # to fit the text; the gap is what keeps a selected row's background
+        # from crowding the values above/below it.
+        column.setSpacing(4)
+        column.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # wheel still scrolls
+        column.setSelectionMode(QAbstractItemView.SingleSelection)
+        for i in range(count):
+            item = QListWidgetItem(f'{i:02d}')
+            item.setTextAlignment(Qt.AlignCenter)
+            column.addItem(item)
+        column.setCurrentRow(selected)
+        column.currentRowChanged.connect(self._update_summary)
+        return column
+
+    def value(self) -> datetime:
+        d = self._calendar.selectedDate()
+        return datetime(d.year(), d.month(), d.day(),
+                        self._hours.currentRow(), self._minutes.currentRow(),
+                        self._seconds.currentRow())
+
+    def _update_summary(self, *_):
+        self._summary.setText(self.value().strftime('%Y-%m-%d   %H:%M:%S'))
+
+    def _center_selected(self):
+        for column in (self._hours, self._minutes, self._seconds):
+            column.scrollToItem(column.currentItem(), QAbstractItemView.PositionAtCenter)
+
+    def _commit(self):
+        self.committed.emit(self.value())
+        self.close()
+
+    def show_near(self, anchor: QRect):
+        """Show below the anchor rect (global coordinates), or above it if
+        there isn't room, and never off the screen edges."""
+        self.adjustSize()
+        screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        x = min(anchor.left(), avail.right() - self.width())
+        y = anchor.bottom() + 4
+        if y + self.height() > avail.bottom():
+            y = anchor.top() - self.height() - 4
+        self.move(max(avail.left(), x), max(avail.top(), y))
+        self.show()
+        self._center_selected()   # needs the final size, so after show()
+
+
 class MediaTableView(QTableView):
-    """QTableView that draws a 1px blue border around each selected row instead
-    of flooding the row with a highlight fill."""
+    """QTableView that draws a 1px blue border around each selected row
+    instead of flooding the row with a highlight fill, and routes clicks
+    on the New filename / Date taken columns explicitly (see
+    mousePressEvent) rather than through Qt's editTriggers — each needs
+    different, specific behaviour (single click anywhere for the filename
+    field; only the calendar icon, never any other click, for the date,
+    and that opens a popup picker, not an in-cell editor) that one global
+    trigger setting can't express. editTriggers is set to NoEditTriggers in
+    MainWindow for exactly this reason."""
+
+    def _open_date_picker(self, index, icon_rect: QRect):
+        f: MediaFile = index.data(MediaFileRole)
+        initial = (f.effective_date or f.date) if f else None
+        popup = DateTimePickerPopup(initial or datetime.now(), self)
+        pidx = QPersistentModelIndex(index)
+
+        def commit(dt):
+            model = self.model()
+            if model is not None and pidx.isValid():
+                model.setData(model.index(pidx.row(), pidx.column()), dt, Qt.EditRole)
+
+        popup.committed.connect(commit)
+        anchor = QRect(self.viewport().mapToGlobal(icon_rect.topLeft()), icon_rect.size())
+        popup.show_near(anchor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # .position() (QPointF) is the non-deprecated replacement for
+            # the old .pos() (QPoint) — .toPoint() truncates back to ints,
+            # which is fine here since it only ever feeds pixel-rect hit
+            # tests (indexAt, QRect.contains), never sub-pixel math.
+            pos = event.position().toPoint()
+            index = self.indexAt(pos)
+            model = self.model()
+            if index.isValid() and model is not None:
+                f: MediaFile = index.data(MediaFileRole)
+                col = index.column()
+
+                if col == COL_PREVIEW and f is not None and not f.is_already_formatted:
+                    delegate = self.itemDelegateForColumn(COL_PREVIEW)
+                    # Just enough of a QStyleOptionViewItem for the
+                    # delegate's rect math, which only ever looks at .rect
+                    # — QTableView has no viewOptions() in this Qt6/PySide6
+                    # version (removed; initViewItemOption(opt) is the
+                    # replacement, but would only be needed if the hit-test
+                    # helpers used font/palette too).
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    # Same test as PreviewDelegate.paint uses to draw the
+                    # icon, so an unpainted icon can't be clicked. '' means
+                    # "clear the box" — the model decides what that means
+                    # for this file (skip it, or for a strong anchor still
+                    # waiting to be renamed, restore its metadata name).
+                    if (f.can_clear_filename
+                            and delegate._reset_icon_rect(opt).contains(pos)):
+                        model.setData(index, '', Qt.EditRole)
+                        return
+                    self.setCurrentIndex(index)
+                    self.edit(index)
+                    return
+
+                if col == COL_DATE and f is not None:
+                    # Allowed on hard anchors too — see
+                    # MediaTableModel.set_manual_date: picking a new date
+                    # here is the only way back if a file got renamed from
+                    # wrong metadata.
+                    delegate = self.itemDelegateForColumn(COL_DATE)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    icon_rect = delegate._calendar_icon_rect(opt)
+                    if icon_rect.contains(pos):
+                        # Straight to the picker popup — the cell itself
+                        # never becomes an input field.
+                        self.setCurrentIndex(index)
+                        self._open_date_picker(index, icon_rect)
+                        return
+                    # Any other click in the date cell is just a normal
+                    # selection click.
+
+        super().mousePressEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -503,7 +842,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 600)
         self.resize(1280, 800)
         self._model        = MediaTableModel()
-        self._is_phase1    = False
         self._expanded     = False
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._on_repeat_tick)
@@ -595,6 +933,13 @@ class MainWindow(QMainWindow):
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setShowGrid(False)
+        # No automatic edit triggers (double-click, F2, etc.) — the New
+        # filename and Date taken columns route every click explicitly
+        # through MediaTableView.mousePressEvent instead, since each needs
+        # different, specific behaviour (single click anywhere for the
+        # filename field; only the calendar icon for the date, never a
+        # double-click) that a single global trigger setting can't express.
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.setStyleSheet('''
@@ -703,7 +1048,6 @@ class MainWindow(QMainWindow):
         self._model.attention_required.connect(self._on_attention_required)
         self._model.metadata_load_error.connect(self._on_metadata_load_error)
         self._model.rename_complete.connect(self._on_rename_complete)
-        self._model.phase_changed.connect(self._on_phase_changed)
         self._model.dataChanged.connect(self._on_model_data_changed)
         self._model.layoutChanged.connect(self._refresh_status)
 
@@ -724,6 +1068,12 @@ class MainWindow(QMainWindow):
             self._model.load_folder(folder)
 
     def _move(self, direction: int, clicked_row: int = -1):
+        # Single choke point for the toolbar buttons, the per-row chevrons
+        # and hold-to-repeat. Moving a strong anchor before it's renamed is
+        # allowed — if that puts it out of chronological order it
+        # re-anchors (averages its neighbours) exactly like any other moved
+        # strong anchor; the badge flips to "interpolated" so it's visible
+        # if that happens. Nothing touches disk until Apply.
         if clicked_row >= 0:
             # Chevron click — move all selected rows if the clicked row is
             # part of that selection, otherwise just the clicked row.
@@ -787,19 +1137,19 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     def _apply_rename(self):
+        # display_filename, not proposed_filename: a manual override or a
+        # blanked ("skip") box must count the same way apply_rename() itself
+        # decides what to rename (media_model.py's `pending` filter there
+        # uses display_filename too) — proposed_filename alone would ignore
+        # both.
         pending = sum(
             1 for f in self._model.files()
-            if f.proposed_filename != f.filename
-            and not f.proposed_filename.startswith('---')
-            and f.proposed_filename != ''
+            if f.display_filename != f.filename
+            and not f.display_filename.startswith('---')
+            and f.display_filename != ''
         )
-        if self._model.has_pending_strong_renames():
-            msg = (f'{pending} file(s) will be renamed with the date '
-                   f'and time they were taken.\n\n'
-                   f'Make sure you have a backup.\n\nContinue?')
-        else:
-            msg = (f'{pending} file(s) will be renamed.\n\n'
-                   f'Make sure you have a backup.\n\nContinue?')
+        msg = (f'{pending} file(s) will be renamed.\n\n'
+               f'Make sure you have a backup.\n\nContinue?')
 
         reply = QMessageBox.question(
             self, 'Apply rename', msg,
@@ -824,17 +1174,9 @@ class MainWindow(QMainWindow):
 
     def _jump_to_attention(self):
         files = self._model.files()
-        if self._is_phase1:
-            target = next(
-                (i for i, f in enumerate(files)
-                 if not f.is_already_formatted
-                 and f.date_source in ('metadata', 'filename')
-                 and not f.user_moved),
-                None)
-        else:
-            target = next(
-                (i for i, f in enumerate(files) if f.needs_attention),
-                None)
+        target = next(
+            (i for i, f in enumerate(files) if f.needs_attention),
+            None)
         if target is not None:
             idx = self._model.index(target, COL_FILENAME)
             self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
@@ -873,6 +1215,7 @@ class MainWindow(QMainWindow):
             THUMB_W, THUMB_H, ROW_H = COMPACT_THUMB_W, COMPACT_THUMB_H, COMPACT_ROW_H
             self._btn_expand.setText('⊞  Expand')
         self._thumb_delegate.set_expanded(self._expanded)
+        self._date_delegate.set_expanded(self._expanded)
         self._table.verticalHeader().setDefaultSectionSize(ROW_H)
         self._table.setColumnWidth(COL_THUMB, THUMB_W + 16)
         self._table.reset()
@@ -933,38 +1276,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_attention_button(self):
         files = self._model.files()
-        if self._is_phase1:
-            n = sum(1 for f in files
-                    if not f.is_already_formatted
-                    and f.date_source in ('metadata', 'filename')
-                    and not f.user_moved)
-            if n > 0:
-                self._btn_attention.setText(f'⚠  {n} file(s) need renaming')
-                self._act_attention.setVisible(True)
-            else:
-                self._act_attention.setVisible(False)
+        n = sum(1 for f in files if f.needs_attention)
+        if n > 0:
+            self._btn_attention.setText(f'⚠  {n} file(s) need positioning')
+            self._act_attention.setVisible(True)
         else:
-            n = sum(1 for f in files if f.needs_attention)
-            if n > 0:
-                self._btn_attention.setText(f'⚠  {n} file(s) need ordering')
-                self._act_attention.setVisible(True)
-            else:
-                self._act_attention.setVisible(False)
-
-    def _on_phase_changed(self, is_phase1: bool):
-        self._is_phase1 = is_phase1
-        for delegate in (self._check_delegate, self._order_delegate,
-                         self._filename_delegate, self._date_delegate,
-                         self._preview_delegate, self._thumb_delegate,
-                         self._move_delegate):
-            delegate.set_phase1(is_phase1)
-        tooltip = ('Rename files with proposed new filenames first — click Apply rename'
-                   if is_phase1 else '')
-        self._btn_up.setToolTip(tooltip)
-        self._btn_down.setToolTip(tooltip)
-        self._refresh_move_buttons()
-        self._refresh_status()
-        self._table.viewport().update()
+            self._act_attention.setVisible(False)
 
     def _on_rename_complete(self, success: int, errors: int):
         if errors == 0:
@@ -1013,35 +1330,23 @@ class MainWindow(QMainWindow):
         self._lbl_files.setText(f'{total} files')
         self._btn_apply.setEnabled(self._model.has_pending_renames())
 
-        if self._is_phase1:
-            n = sum(1 for f in files
-                    if not f.is_already_formatted
-                    and f.date_source in ('metadata', 'filename')
-                    and not f.user_moved)
-            self._lbl_flagged.setText('')
-            self._lbl_toolbar_rename.setText(
-                f'Rename the {n} highlighted file(s)')
-        else:
-            will_rename = sum(
-                1 for f in files
-                if f.proposed_filename != f.filename
-                and not f.proposed_filename.startswith('---')
-                and f.proposed_filename != ''
-            )
-            flagged = sum(1 for f in files if f.needs_attention)
-            self._lbl_flagged.setText(f'  ·  {flagged} flagged' if flagged else '')
-            self._lbl_toolbar_rename.setText(
-                f'{will_rename} file(s) to be renamed.' if will_rename else '')
+        # display_filename, not proposed_filename — see _apply_rename.
+        will_rename = sum(
+            1 for f in files
+            if f.display_filename != f.filename
+            and not f.display_filename.startswith('---')
+            and f.display_filename != ''
+        )
+        flagged = sum(1 for f in files if f.needs_attention)
+        self._lbl_flagged.setText(f'  ·  {flagged} flagged' if flagged else '')
+        self._lbl_toolbar_rename.setText(
+            f'{will_rename} file(s) to be renamed.' if will_rename else '')
         self._refresh_attention_button()
 
     def _refresh_move_buttons(self):
-        if self._is_phase1:
-            self._btn_up.setEnabled(False)
-            self._btn_down.setEnabled(False)
-        else:
-            has_sel = bool(self._model.get_selected_indices())
-            self._btn_up.setEnabled(has_sel)
-            self._btn_down.setEnabled(has_sel)
+        has_sel = bool(self._model.get_selected_indices())
+        self._btn_up.setEnabled(has_sel)
+        self._btn_down.setEnabled(has_sel)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

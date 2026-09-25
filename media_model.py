@@ -29,7 +29,8 @@ from PySide6.QtGui import QColor, QPixmap, QImage
 from metadata_reader import (
     read_metadata_batch, build_new_filename,
     SUPPORTED_EXTENSIONS,
-    DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED
+    DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED,
+    DATE_SOURCE_METADATA, DATE_SOURCE_MANUAL
 )
 
 # Without pillow-heif, Pillow can't open .heic/.heif files and their
@@ -111,9 +112,51 @@ class MediaFile:
     # placeholder) apart from "no thumbnail available" (static placeholder).
     thumbnail_loaded: bool = False
 
+    # User-typed override of proposed_filename, from the editable New
+    # filename cell. None means "use the auto-computed name". Kept separate
+    # from proposed_filename (rather than overwriting it) so the auto value
+    # stays correct underneath — recalculate_proposed_filenames() never
+    # looks at this field, and resetting it (the "x" button) needs no
+    # recompute. Cleared on Apply (baked into the new f.filename) and
+    # whenever the file's date is edited (a stale manual name from before
+    # a date correction would no longer match).
+    manual_filename: Optional[str] = None
+
     def __post_init__(self):
         if not self.proposed_filename:
             self.proposed_filename = self.filename
+
+    @property
+    def display_filename(self) -> str:
+        """What to show and rename to — the manual override if the user set
+        one, otherwise the auto-computed proposed_filename."""
+        return self.manual_filename if self.manual_filename is not None else self.proposed_filename
+
+    @property
+    def gates_phase1(self) -> bool:
+        """True for a strong anchor still waiting to be renamed — the files
+        that hold the app in Phase 1 (Move buttons disabled) until Apply.
+        The single definition of that test: MediaTableModel.has_pending_strong_renames()
+        and the attention button / status counts in main.py use it directly,
+        and can_clear_filename builds on it. Add a strong date source here
+        and every one of them follows."""
+        return (not self.is_already_formatted
+                and self.date_source in (DATE_SOURCE_METADATA, DATE_SOURCE_FILENAME,
+                                         DATE_SOURCE_MANUAL)
+                and not self.user_moved)
+
+    @property
+    def can_clear_filename(self) -> bool:
+        """Whether the New filename field's "x" is shown right now — the one
+        rule both its painting and its click handling use.
+
+        Whenever the box holds a real name (not blank, not a '---'
+        instruction placeholder): with nothing there, there's nothing to
+        clear. Clicking it always clears to blank, which means skip this
+        file on Apply — uniform across every state, since there's no longer
+        a Move-button gate a blank strong anchor could get stuck behind."""
+        name = self.display_filename
+        return name != '' and not name.startswith('---')
 
 
 # ── Worker signals ──────────────────────────────────────────────────────────
@@ -436,7 +479,7 @@ class MediaTableModel(QAbstractTableModel):
                     return dt.strftime('%Y-%m-%d %H:%M:%S')
                 return 'No date found'
             if col == COL_PREVIEW:
-                return f.proposed_filename
+                return f.display_filename
 
         if role == Qt.CheckStateRole and col == COL_CHECK:
             return Qt.Checked if f.selected else Qt.Unchecked
@@ -445,16 +488,14 @@ class MediaTableModel(QAbstractTableModel):
             return f.thumbnail
 
         if role == Qt.BackgroundRole:
-            if f.is_already_formatted:
-                return QColor('#FAFAFA' if row % 2 else '#FFFFFF')
-            is_weak = f.date_source in (DATE_SOURCE_MODIFIED, DATE_SOURCE_NONE)
             alt = bool(row % 2)
-            if self._is_phase1:
-                return (QColor('#EEEEEE' if alt else '#F3F4F6') if is_weak
-                        else QColor('#FFFBEB' if alt else '#FEF3C7'))
-            else:
-                return (QColor('#FFFBEB' if alt else '#FEF3C7') if is_weak
-                        else QColor('#FAFAFA' if alt else '#FFFFFF'))
+            # Amber marks "needs a decision" (weak, unmoved, no value) —
+            # the only row state that's not already self-explanatory from
+            # the New filename box's own contents/colour. Every other row,
+            # hard anchor or not, gets the plain alternating background.
+            if f.needs_attention:
+                return QColor('#FFFBEB' if alt else '#FEF3C7')
+            return QColor('#FAFAFA' if alt else '#FFFFFF')
 
         # Custom roles used by delegates
         if role == MediaFileRole:      return f
@@ -476,13 +517,93 @@ class MediaTableModel(QAbstractTableModel):
             self.dataChanged.emit(index, index, [role])
             return True
 
+        if role == Qt.EditRole and col == COL_PREVIEW:
+            # value is passed through as-is, not "value or None" — '' and
+            # None are different requests (skip this file vs. no override
+            # at all) and collapsing them here would silently turn every
+            # "clear to skip" into a "revert to auto" instead. See
+            # set_manual_filename.
+            self.set_manual_filename(row, value)
+            return True
+
+        if role == Qt.EditRole and col == COL_DATE:
+            self.set_manual_date(row, value)
+            return True
+
         return False
 
     def flags(self, index: QModelIndex):
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if index.column() == COL_CHECK:
+        col = index.column()
+        if col == COL_CHECK:
             base |= Qt.ItemIsUserCheckable
+        elif col == COL_PREVIEW:
+            row = index.row()
+            # Hard anchors are already renamed — the filename is the source
+            # of truth, so it isn't editable: letting it be edited would
+            # violate "hard anchor never renames". (The Date taken column
+            # isn't an editor at all — its calendar icon opens a popup that
+            # calls setData directly; see MediaTableView.)
+            if row < len(self._files) and not self._files[row].is_already_formatted:
+                base |= Qt.ItemIsEditable
         return base
+
+    def set_manual_filename(self, row: int, name: Optional[str]):
+        """Set a per-file override of the proposed filename, from the
+        editable New filename field or its clear ('x') icon (which just
+        sends '').
+
+        name=None means "no override" — display falls back to the
+        auto-computed proposed_filename (see display_filename). Any other
+        string is an explicit override and is kept as typed. '' in
+        particular means "skip this file on Apply" (apply_rename()'s
+        pending filter already excludes an empty display_filename) —
+        uniformly, for every non-hard-anchor file: there's no longer a
+        Move-button gate a blank strong anchor could get stuck behind (see
+        MainWindow._move), so there's nothing left to protect it from.
+
+        Doesn't touch proposed_filename itself, so clearing back to None
+        needs no recompute — that's the whole point of keeping the two
+        separate."""
+        if row < 0 or row >= len(self._files):
+            return
+        f = self._files[row]
+        name = name.strip() if name is not None else None
+        if f.manual_filename == name:
+            return
+        f.manual_filename = name
+        idx = self.index(row, COL_PREVIEW)
+        self.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+
+    def set_manual_date(self, row: int, dt: datetime):
+        """Apply a user-entered date/time from the Date taken date-time
+        picker. Treated as a strong anchor (see _is_strong) sourced from
+        the user rather than metadata — for files like WhatsApp/shared
+        media whose embedded metadata is wrong. Clears user_moved, since
+        the chosen date is now the authoritative position, and any manual
+        filename override, since it would otherwise show a stale name.
+        Clearing that override also keeps a file that has just become a
+        Phase 1 gate from carrying a blank one (see set_manual_filename).
+
+        Also clears is_already_formatted, demoting a hard anchor back to an
+        ordinary strong anchor. A hard anchor is only trustworthy because
+        renaming stamped it with a real date — but that date can itself be
+        wrong (WhatsApp/iOS-shared media whose metadata reflects the share
+        date, not capture), and "hard anchor never renames" would otherwise
+        make that permanent with no way back. Demoting it re-admits it to
+        Pass 1 as a strong-anchor-not-moved file: build_new_filename strips
+        the old (wrong) YYYYMMDD_HHMMSS prefix and proposes a new one from
+        the corrected date, and the New filename box reappears (it's driven
+        by the same flag) so it can be renamed for real on the next Apply."""
+        if row < 0 or row >= len(self._files) or dt is None:
+            return
+        f = self._files[row]
+        f.date                 = dt
+        f.date_source          = DATE_SOURCE_MANUAL
+        f.user_moved           = False
+        f.manual_filename      = None
+        f.is_already_formatted = False
+        self.recalculate_proposed_filenames()
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -656,8 +777,14 @@ class MediaTableModel(QAbstractTableModel):
                     if f.is_already_formatted:
                         f.proposed_filename = f.filename
                     else:
+                        # force=True: f.filename can still look formatted
+                        # here (a hard anchor just demoted by
+                        # set_manual_date, ahead of its actual on-disk
+                        # rename) — without it, build_new_filename's own
+                        # already-formatted guard would hand back the old,
+                        # wrong-dated name unchanged.
                         f.proposed_filename = build_new_filename(
-                            f.filename, own_dt, is_interpolated=False)
+                            f.filename, own_dt, is_interpolated=False, force=True)
                     f.effective_date = own_dt
 
                 else:
@@ -669,7 +796,7 @@ class MediaTableModel(QAbstractTableModel):
                             f.proposed_filename = f.filename
                         else:
                             f.proposed_filename = build_new_filename(
-                                f.filename, own_dt, is_interpolated=False)
+                                f.filename, own_dt, is_interpolated=False, force=True)
                         f.effective_date = own_dt
                     else:
                         # Out of order — average between neighbours.
@@ -778,23 +905,30 @@ class MediaTableModel(QAbstractTableModel):
 
     def apply_rename(self):
         """
-        Rename files on disk based on proposed_filename.
+        Rename files on disk based on display_filename (the manual override
+        if one is set, otherwise the auto-computed proposed_filename).
         Checks existence before renaming, collects errors without stopping.
-        Writes metadata timestamp for interpolated files only.
+        Writes metadata timestamp for interpolated files, and for files
+        with a manually-entered date — the point of a manual date is
+        usually that the file's own metadata is wrong (e.g. WhatsApp/shared
+        files carry the share date), so Apply corrects it on disk too.
         """
         exiftool_path = _vendor_path('exiftool.exe')
         success = 0
         errors  = 0
 
         pending = [f for f in self._files
-                   if f.proposed_filename != f.filename
-                   and not f.proposed_filename.startswith('---')
-                   and f.proposed_filename != '']
+                   if f.display_filename != f.filename
+                   and not f.display_filename.startswith('---')
+                   and f.display_filename != '']
         total = len(pending)
 
         for done, f in enumerate(pending, 1):
             src  = Path(f.filepath)
-            dest = src.parent / f.proposed_filename
+            dest = src.parent / f.display_filename
+            # Captured before the filename-parse below can overwrite
+            # date_source to 'filename'.
+            write_metadata = f.is_interpolated or f.date_source == DATE_SOURCE_MANUAL
 
             if not src.exists():
                 errors += 1
@@ -802,7 +936,7 @@ class MediaTableModel(QAbstractTableModel):
                 try:
                     src.rename(dest)
                     f.filepath  = str(dest)
-                    f.filename  = f.proposed_filename
+                    f.filename  = f.display_filename
 
                     m = re.match(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})',
                                  f.filename)
@@ -816,13 +950,14 @@ class MediaTableModel(QAbstractTableModel):
                         except ValueError:
                             pass
 
-                    if f.is_interpolated:
+                    if write_metadata:
                         self._write_metadata_date(str(dest), f, exiftool_path)
 
                     f.is_already_formatted = True
                     f.is_interpolated      = False
                     f.is_re_anchored       = False
                     f.user_moved           = False
+                    f.manual_filename      = None
                     f.proposed_filename    = f.filename
                     f.effective_date       = f.date
                     success += 1
@@ -844,10 +979,14 @@ class MediaTableModel(QAbstractTableModel):
 
     def _write_metadata_date(self, filepath: str, f: MediaFile,
                               exiftool_path: str):
-        """Write interpolated timestamp back to file metadata via exiftool."""
+        """Write the new timestamp back to file metadata via exiftool.
+        Called for interpolated files and manually-dated files (see
+        apply_rename). f.filename is already the new name at this point —
+        parsed from there, not proposed_filename, so this reflects a
+        manual filename override too, not just the auto-computed one."""
         import re, subprocess
         m = re.match(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})',
-                     f.proposed_filename)
+                     f.filename)
         if not m:
             return
         g      = m.groups()
@@ -868,18 +1007,13 @@ class MediaTableModel(QAbstractTableModel):
 
     def has_pending_renames(self) -> bool:
         return any(
-            f.proposed_filename != f.filename and
-            not f.proposed_filename.startswith('---') and f.proposed_filename != ''
+            f.display_filename != f.filename and
+            not f.display_filename.startswith('---') and f.display_filename != ''
             for f in self._files
         )
 
     def has_pending_strong_renames(self) -> bool:
-        return any(
-            not f.is_already_formatted
-            and f.date_source in ('metadata', 'filename')
-            and not f.user_moved
-            for f in self._files
-        )
+        return any(f.gates_phase1 for f in self._files)
 
     def attention_count(self) -> int:
         return sum(1 for f in self._files if f.needs_attention)

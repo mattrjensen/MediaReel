@@ -28,6 +28,10 @@ DATE_SOURCE_METADATA = 'metadata'
 DATE_SOURCE_FILENAME = 'filename'
 DATE_SOURCE_MODIFIED = 'date modified'
 DATE_SOURCE_NONE = 'none'
+# Set only by the UI (MediaTableModel.set_manual_date), never by anything in
+# this module — a user-entered date, e.g. correcting a WhatsApp/shared file
+# whose embedded metadata reflects the share date, not the capture date.
+DATE_SOURCE_MANUAL = 'manual'
 
 FILENAME_DATE_PATTERNS = [
     r'(\d{4})(\d{2})(\d{2})[_\-](\d{2})(\d{2})(\d{2})',

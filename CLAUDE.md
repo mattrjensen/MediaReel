@@ -60,9 +60,17 @@ For each file, resolve its timestamp using this priority chain:
 3. **Date modified** — OS file modification timestamp. Unreliable (reflects download/copy time, not capture time). Treated as weak — same as no date for rename purposes.
 4. **None** — no resolvable date.
 
-The `date_source` field records which tier was used: `metadata`, `filename`, `date modified`, `none`.
+A fifth tier, **manual**, doesn't come from this chain at all — it's set only by
+the user, via the calendar icon in the Date taken cell (see "Per-file
+date/time editing" under UI behaviour). It ranks as strong, above the automatic tiers in
+trust even though it isn't checked as part of this priority order: the user
+is knowingly overriding whatever this chain would have picked, typically
+because it's wrong (a WhatsApp/shared file whose metadata reflects the share
+date, not the capture date).
 
-**Strong date** = `date_source` is `metadata` or `filename`
+The `date_source` field records which tier was used: `metadata`, `filename`, `date modified`, `none`, `manual`.
+
+**Strong date** = `date_source` is `metadata`, `filename`, or `manual`
 **Weak/no date** = `date_source` is `date modified` or `none`
 
 ### iOS video timezone correction
@@ -114,7 +122,7 @@ Every file is classified into one of five states. These drive the rename logic, 
 
 ### Rename rules
 
-- **Hard anchor** — filename already starts `YYYYMMDD_HHMMSS`. No rename, no proposed filename change. Already the source of truth.
+- **Hard anchor** — filename already starts `YYYYMMDD_HHMMSS`. No rename, no proposed filename change. Already the source of truth — unless that date is itself wrong (e.g. WhatsApp/iOS share-date metadata), in which case picking a corrected date via the Date taken cell's calendar icon demotes it back to an ordinary strong anchor; see "Wrong-metadata hard anchors" under Per-file date/time editing.
 
 - **Strong anchor, not moved** — propose rename using own metadata/filename date, full seconds. Becomes `YYYYMMDD_HHMMSS_<stripped_name>`. On Apply, rename only — do not update metadata.
 
@@ -153,9 +161,12 @@ ext: str                       # lowercase extension
 is_video: bool
 is_already_formatted: bool     # filename already starts with YYYYMMDD_HHMMSS
 date: datetime | None          # resolved source date
-date_source: str               # 'metadata' | 'filename' | 'date modified' | 'none'
+date_source: str               # 'metadata' | 'filename' | 'date modified' | 'none' | 'manual'
 stripped_filename: str         # filename with any embedded date string removed
-proposed_filename: str         # live preview of new filename; equals filename if no change
+proposed_filename: str         # AUTO-computed preview of new filename, from
+                               # recalculate_proposed_filenames() only — never
+                               # touched by a manual filename override. Equals
+                               # filename if no change.
 is_interpolated: bool          # date derived from neighbours (weak anchor, moved)
 is_re_anchored: bool           # strong anchor moved out of chronological order
 needs_attention: bool          # weak anchor, not yet moved into position
@@ -167,7 +178,28 @@ effective_date: datetime | None # the date this file will carry after rename;
 thumbnail: QPixmap | None      # loaded async after initial metadata
 duration_seconds: int | None   # video only
 selected: bool                 # checkbox state
+manual_filename: str | None    # user override from the editable New filename
+                               # field. None = use proposed_filename; '' = skip
+                               # this file on Apply; any other string = rename
+                               # to exactly that. See display_filename and
+                               # "Editable New filename column" under UI
+                               # behaviour.
 ```
+
+`display_filename` (property, not a stored field) is what's actually shown and
+renamed: `manual_filename` if set, else `proposed_filename`. Reading through
+this property — not `proposed_filename` directly — is what lets the reset
+("x") button be an O(1) field clear with no recompute: the auto value was
+never overwritten in the first place.
+
+`gates_phase1` (also a property) — "a strong anchor still waiting to be
+renamed": `not is_already_formatted`, a strong `date_source` (`metadata` /
+`filename` / `manual`), and `not user_moved`. Informational only (see "No
+operational phases") — nothing in `main.py` uses it to gate anything.
+
+`can_clear_filename` (another property) is the single rule for whether the
+New filename field's "x" is shown: the box holds a real name (not blank, not a
+`---` instruction placeholder). Painting and click handling both use it.
 
 ---
 
@@ -228,6 +260,19 @@ If two files would get the same proposed filename, append `_01`, `_02` suffixes 
 | Strong anchor, moved (re-anchored) | yes — prepend averaged date, full seconds | no — preserve original metadata |
 | Weak anchor, moved (interpolated) | yes — prepend interpolated date, full seconds | yes — write new timestamp to file metadata |
 | Weak anchor, not moved | skip | skip |
+| Manually dated (`date_source == 'manual'`) | yes — prepend the entered date, full seconds | yes — write new timestamp to file metadata |
+
+The manually-dated row isn't really a sixth state in the five-state sense —
+`_is_strong()` already treats `'manual'` as strong, so such a file falls into
+whichever of the first two rows its `user_moved` value puts it in. It's
+listed separately here because it's the one case in those two rows where
+metadata *is* written: the metadata write is decided by
+`f.is_interpolated or f.date_source == DATE_SOURCE_MANUAL`, captured in
+`apply_rename()` before the immediately-following filename-prefix parse can
+overwrite `date_source` to `'filename'`. Rename destination and target for
+that decision are always `f.display_filename` (the manual filename override
+if one is set, else `f.proposed_filename`), not `f.proposed_filename`
+directly — see "Editable New filename column" under UI behaviour.
 
 After renaming, for each renamed file:
 - Update `f.date` from the new filename prefix
@@ -235,6 +280,7 @@ After renaming, for each renamed file:
 - Set `f.is_already_formatted = True`
 - Reset `f.user_moved = False`
 - Reset `f.is_interpolated = False`, `f.is_re_anchored = False`
+- Reset `f.manual_filename = None` — it's been applied, `f.filename` is now that value
 - Update `f.effective_date = f.date`
 
 Check file exists before renaming. Collect errors without stopping the batch. Emit `rename_complete(success_count, error_count)` when done.
@@ -252,24 +298,18 @@ After the resort and recalculate, scroll the table back to the top via
 from the beginning of the list.
 
 ### Apply rename confirmation dialog
-The confirmation dialog is phase-aware — single prompt, no separate pre-prompt.
-
-**Phase 1** (`has_pending_strong_renames() == True`):
-{n} file(s) will be renamed to start with the date and time they were taken.
-
-Make sure you have a backup.
-
-Continue?
-
-**Phase 2** (`has_pending_strong_renames() == False`):
+One message, always:
 {n} file(s) will be renamed.
 
 Make sure you have a backup.
 
 Continue?
 
-Implementation: in `MainWindow._apply_rename()`, use `has_pending_strong_renames()`
-to determine which dialog text to show. Single `QMessageBox` call in both cases.
+`{n}` counts files where `display_filename` differs from `filename` (not
+`proposed_filename` — a manual override or a blanked/skipped box must count
+the same way `apply_rename()` itself decides what to rename; see "Editable
+New filename column"). Implementation: a single `QMessageBox` call in
+`MainWindow._apply_rename()`.
 
 ---
 
@@ -279,6 +319,7 @@ to determine which dialog text to show. Single `QMessageBox` call in both cases.
 
 | Colour | Meaning |
 |---|---|
+| (empty) | Hard anchor — nothing will change, so nothing is shown |
 | Grey | No change will happen, or placeholder instruction text |
 | Amber | Will be renamed — any file getting a new name (own date, re-anchored, or interpolated) |
 
@@ -291,78 +332,55 @@ status instruction, not a proposed rename.
 |---|---|---|
 | `metadata` | Green | Date from EXIF/video metadata — most trusted |
 | `filename` | Grey | Date parsed from filename string |
-| `date modified` | Grey (Phase 1) / Amber (Phase 2) | OS modification timestamp — unreliable, treat as weak |
+| `date modified` | Amber | OS modification timestamp — unreliable, treat as weak |
 | `interpolated` | Orange | Date derived from neighbours |
-| `none` | Grey (Phase 1) / Red (Phase 2) | No date found |
-
-In Phase 1, weak file badges (`date modified`, `none`) are grey to reinforce
-that these files are not yet actionable.
+| `none` | Red | No date found |
+| `manual` | Purple | User-entered date (calendar icon) |
 
 ### Row background
 
-| Phase | Row type | Background |
-|---|---|---|
-| Both | Hard anchor | White / faint grey alternating (normal) |
-| Both | Selected | 1px blue border (`#2563EB`) around row — background colour unchanged |
-| Phase 1 | Strong anchor | Light amber (`#FEF3C7`) / very light amber (`#FFFBEB`) alternating |
-| Phase 1 | Weak anchor | Slightly greyed out (`#F3F4F6`) / (`#EEEEEE`) alternating |
-| Phase 2 | Weak anchor (moved or not) | Light amber (`#FEF3C7`) / very light amber (`#FFFBEB`) alternating |
-| Phase 2 | Hard anchor | White / faint grey alternating (normal) |
+| Row type | Background |
+|---|---|
+| `needs_attention` (weak, unmoved, no value) | Light amber (`#FEF3C7`) / very light amber (`#FFFBEB`) alternating |
+| Everything else (hard anchor, strong anchor, moved weak anchor) | White / faint grey alternating (normal) |
+| Selected | 1px blue border (`#2563EB`) around row — background colour unchanged |
 
-Amber row = "this file needs your attention / will be renamed."
-Grey row in Phase 1 = "not actionable yet."
+Amber row means exactly one thing: this file has no value in its New
+filename box and hasn't been positioned yet — it's the only row state not
+already self-explanatory from the box's own contents/colour (a filled box
+already shows, via its text colour, whether it'll be renamed). There's no
+separate "not actionable yet" row state — see "No operational phases" below
+for why.
 
 ---
 
-## Phase 1 / Phase 2 state
+## No operational phases
+Earlier versions of this app gated the whole table behind two sequential
+phases — Move disabled and most colour coding suppressed until every strong
+anchor was renamed, only unlocking weak-file positioning afterwards. That's
+gone. Every row is independently actionable at all times: the New filename
+box always reflects what will happen on the next Apply, "x" always clears it
+to blank (skip), and Move is never disabled.
 
-The app has two operational phases driven by `has_pending_strong_renames()`.
+**What phases were protecting against, and why it's an acceptable trade to
+drop:** a strong anchor's own metadata is trustworthy, but only for that
+file's *own* date — if the user drags it to a new position before it's
+renamed and that position turns out chronologically inconsistent, Pass 1
+re-anchors it (averages its neighbours) instead of trusting its own date,
+exactly the same as any other moved strong anchor already does. Phase 1
+existed to prevent this happening *by accident*, before the user had a
+chance to lock the trustworthy date in via Apply. But nothing touches disk
+until Apply, the proposed filename updates live as the file moves, and the
+badge visibly flips from green "metadata" to orange "interpolated" if it
+happens — a low-stakes, fully visible, easily-undone (just drag it back)
+mistake, not one that justifies disabling Move for the whole table.
 
-### has_pending_strong_renames()
-
-```python
-def has_pending_strong_renames(self) -> bool:
-    return any(
-        not f.is_already_formatted
-        and f.date_source in ('metadata', 'filename')
-        and not f.user_moved
-        for f in self._files
-    )
-```
-
-Returns `True` while any strong anchor files remain unrennamed. Drives all
-Phase 1 vs Phase 2 UI state. Called after every `apply_rename()` and after
-`recalculate_proposed_filenames()`.
-
-### Phase 1 — strong anchors pending
-
-Condition: `has_pending_strong_renames() == True`
-
-- **Move up / Move down buttons** — disabled
-- **Tooltip on Move buttons** — `"Rename files with proposed new filenames first — click Apply rename"`
-- **Status message** — `"Rename the {n} highlighted file(s) first — click Apply rename to apply their automatically assigned new filenames"`
-- **Strong anchor rows** — light amber / very light amber alternating background
-- **Weak anchor rows** — greyed out background; all row text grey; `date modified` and `none` badges grey
-- **Weak anchor placeholder text** — `'--- Click \'Apply rename\' once you have reviewed the proposed new filename(s) for the highlighted files ---'`
-- **Apply rename** — enabled; only renames strong anchors (weak files have no proposed rename in Phase 1). Confirmation dialog shows Phase 1 text.
-- **N files need attention button** — visible when any strong anchors have pending renames. Label: `"⚠ {n} file(s) need renaming"`. Clicking jumps to first strong anchor with `is_already_formatted=False`, `date_source in ('metadata', 'filename')`, and `user_moved=False`.
-
-### Phase 2 — all strong anchors renamed
-
-Condition: `has_pending_strong_renames() == False`
-
-- **Move up / Move down buttons** — enabled (subject to selection)
-- **Tooltip on Move buttons** — none
-- **Status message** — standard status (selected count, rename count, flagged count)
-- **Weak anchor rows** — light amber / very light amber alternating (all weak files, moved or not)
-- **Weak anchor, not moved** — grey placeholder: `'--- Nudge into position ---'`
-- **Weak anchor, moved** — amber proposed filename text
-- **N files need attention button** — visible when any weak files have `needs_attention=True`. Label: `"⚠ {n} file(s) need positioning"`. Clicking jumps to first weak anchor with `needs_attention=True`.- **Apply rename** — renames moved weak files only. Confirmation dialog shows Phase 2 text.
-
-### Transition
-
-Happens automatically after `apply_rename()` completes and resort/recalculate
-runs. No user action needed beyond clicking Apply rename.
+**`MediaFile.gates_phase1` and `MediaTableModel.has_pending_strong_renames()`
+still exist**, but purely as informational counts (e.g. for the standalone
+diagnostic script in `tests/test_model.py`) — nothing in `main.py` reads
+them any more. `MoveDelegate`, `DateDelegate` and the row-background logic
+in `BaseDelegate._draw_bg` / `MediaTableModel.data()` no longer take a phase
+into account at all; the only per-row distinction left is `needs_attention`.
 
 ---
 
@@ -373,8 +391,8 @@ runs. No user action needed beyond clicking Apply rename.
 | 0 | Checkbox | Selection |
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
-| 3 | Date taken | Source badge (top) + formatted datetime (below) |
-| 4 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. |
+| 3 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
+| 4 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
 | 5 | Preview | Thumbnail. Videos show first frame + duration badge. |
 | 6 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
 
@@ -399,6 +417,149 @@ runs. No user action needed beyond clicking Apply rename.
 - Toolbar buttons and per-row chevrons both route through `MainWindow._move(direction, clicked_row)`
 - Selection is retained after move — selected rows follow their files to the new position
 - `user_moved = True` is set on moved files in `move_rows()`
+
+### Editable New filename column
+`PreviewDelegate` paints the cell as a text-input box — fixed ~40px tall
+(`_BOX_H`) and vertically centred whatever the row height, so it reads as a
+normal input in both compact and expanded mode; `#93C5FD` blue border if a
+manual override is active, `#E5E7EB` grey otherwise. It does not give every
+row a real, live `QLineEdit`: with up to 2000 rows, that many always-alive
+widgets would be a real performance cost, directly against everything the
+batching work optimised for. A real `QLineEdit` is created only for the one
+cell being edited (`createEditor`, sized to the painted box by
+`updateEditorGeometry` so opening it doesn't jump).
+
+**A single click anywhere in the box starts editing** — no double-click.
+Qt's `editTriggers` can't express this per column (the Date taken column
+needs different behaviour), so `MainWindow` sets `NoEditTriggers` and
+`MediaTableView.mousePressEvent` routes every click on the two special
+columns itself, calling `edit(index)` directly. Consequences: F2/Enter no
+longer start an edit, and a click in this column doesn't do normal
+row-selection handling.
+
+- Hard-anchor rows are empty, not editable (`MediaTableModel.flags()` and
+  `mousePressEvent` both check): the filename is already the source of
+  truth, and allowing an edit would let a hard anchor get renamed, which
+  "hard anchor never renames" forbids. (The one way back is the calendar
+  icon, which demotes it out of hard-anchor status first — see "Wrong-
+  metadata hard anchors" under Per-file date/time editing.)
+- Editing commits through `model.setData(index, text, Qt.EditRole)` →
+  `MediaTableModel.set_manual_filename()`, which sets `f.manual_filename`
+  and emits `dataChanged` for just that cell (`Qt.DisplayRole`) — this is
+  what `MainWindow._on_model_data_changed` treats as a normal (not
+  thumbnail-only) change, so `_refresh_status()` runs and the Apply button's
+  enabled state updates. Nothing touches disk until Apply.
+- The editor pre-selects just the filename stem (`Path(text).stem`) when it
+  opens, Explorer-rename style. (This differs from a plain input, where a
+  click places the caret; because `edit()` is called from the press event,
+  the click position can't be forwarded to the editor anyway.)
+- **The "x"** is shown whenever the box holds a real name
+  (`MediaFile.can_clear_filename`) — not when it's blank (nothing to clear)
+  or showing a `---` instruction placeholder (not a name). Clicking it always
+  sends `''` to the model (`setData(index, '', Qt.EditRole)` →
+  `MediaTableModel.set_manual_filename()`), and blank always means the same
+  thing regardless of the file's state: **skip this file on Apply** —
+  `apply_rename()`'s pending filter, `has_pending_renames()`, and the status-
+  bar/dialog counts in `main.py` (`_refresh_status`, `_apply_rename`) all
+  read `display_filename`, which is blank once skipped. Emptying the field
+  by hand in the editor does the same thing as clicking the "x". Paint
+  (`PreviewDelegate.paint`) and hit-test (`MediaTableView.mousePressEvent`)
+  share `can_clear_filename` and `_reset_icon_rect`, so an unpainted icon
+  can't be clicked and the two can't drift apart.
+
+  This used to special-case a strong anchor still waiting to be renamed —
+  blanking it would leave it stuck forever, since Move was disabled while
+  any such file was pending and Apply skips a blank box, so there'd be no
+  route left to resolve it. That's no longer true (see "No operational
+  phases"): Move is never disabled, so the user can always reposition a
+  skipped strong anchor to change its outcome, the same as any other file.
+- **No way back from a blank** except typing a name: the "x" is hidden on an
+  empty box, so it can't restore the suggested one. (For an unmoved weak
+  file there's nothing to restore — the suggestion is just the placeholder.)
+- Not handled: two files landing on the same `display_filename` (whether
+  from a manual filename, a manual date, or a collision with an
+  auto-computed name). Collision resolution (Pass 3) only runs over the
+  auto `proposed_filename`. In practice this fails safe:
+  `apply_rename()`'s per-file `try/except` means the second rename to an
+  already-taken path raises, gets caught, and counts as one of the errors
+  in the existing "N failed" dialog — not silent data loss, just not
+  proactively prevented or explained as a collision.
+
+### Per-file date/time editing
+The Date taken cell shows a small calendar icon at its right edge (drawn with
+`QPainter` primitives, `DateDelegate._draw_calendar_icon`, so it's a flat
+single colour rather than a Unicode/emoji glyph). Clicking it opens
+`DateTimePickerPopup` directly — **the cell never turns into an input field,
+and double-clicking the date does nothing.** Any click in the cell outside
+the icon is an ordinary row-selection click.
+
+**Shown and clickable on every row, including hard anchors** — this is
+deliberate, not an oversight: a hard anchor is only trustworthy because
+renaming stamped it with a real date, but that date can itself be wrong
+(WhatsApp/iOS-shared media whose metadata reflects the share date, not
+capture) — see "Wrong-metadata hard anchors" below for what picking a date
+there does.
+
+`DateTimePickerPopup` (a `QDialog` with the `Qt.Popup` flag, so it closes on
+any click outside it or on Escape) is a calendar with three clickable columns
+beside it — Hour (00-23), Min and Sec (00-59), each a `QListWidget` where
+you click the value you want (the mouse wheel scrolls them). It is
+deliberately a *picker*, not a time field you type into: typing a time would
+be no better than typing the filename. (`QDateTimeEdit`'s built-in calendar
+popup is date-only, so it couldn't be used anyway.) A summary line under the
+calendar shows exactly what "Set date and time" will apply. The row index in
+each list *is* its value, so `currentRow()` reads it back directly.
+
+It is pre-filled with `f.effective_date or f.date` — the value the cell
+displays — with the current hour/min/sec scrolled into view (`show_near()`
+calls `_center_selected()` after `show()`, since it needs the final size),
+and shows below the icon (above if there's no room, never off-screen).
+"Set date and time" emits `committed(datetime)`; Cancel, Escape or clicking
+away changes nothing. Selections (calendar day, list rows) use the app's solid
+blue: the app palette's `Highlight` is a very pale blue that made them
+nearly invisible.
+
+`MediaTableView._open_date_picker` opens it, and holds a
+`QPersistentModelIndex` so the commit still lands on the right row if rows
+move while the popup is open. Committing calls
+`model.setData(index, dt, Qt.EditRole)` → `MediaTableModel.set_manual_date(row, dt)`,
+which:
+1. Sets `f.date = dt`, `f.date_source = 'manual'`.
+2. Clears `f.user_moved = False` — the chosen date is now the file's
+   authoritative position, so Pass 1 takes the simple "untouched strong
+   anchor" branch rather than re-anchoring/averaging against neighbours.
+3. Clears `f.manual_filename = None` — a filename typed before the date
+   correction was based on the old, wrong date and would otherwise sit
+   there unchanged and stale.
+4. Runs a full `recalculate_proposed_filenames()` — unlike the filename
+   reset above, this can legitimately change other rows too (this file may
+   now anchor its neighbours' interpolation), so it isn't a targeted,
+   single-cell update.
+
+`_is_strong()` needed no change to treat `'manual'` as strong: it already
+returns strong for any `date_source` that isn't `'date modified'` or
+`'none'`.
+
+#### Wrong-metadata hard anchors
+`set_manual_date` also clears `f.is_already_formatted`, demoting a hard
+anchor back to an ordinary strong anchor. Without this, "hard anchor never
+renames" — meant for a file that was already correctly named before the app
+touched it — would also permanently lock in a file the app itself renamed
+from *wrong* metadata, with no way to fix it. Once demoted the file re-enters
+Pass 1 as a strong-anchor-not-moved file like any other: `build_new_filename`
+strips the old (wrong) `YYYYMMDD_HHMMSS` prefix from `f.filename` and
+proposes a new one from the corrected date, and the New filename box and its
+"x" reappear automatically (they're driven by the same `is_already_formatted`
+flag, not a separate switch) so the file can be renamed for real on the next
+Apply. Nothing on disk changes until then — `f.filename` still reads the old
+(wrong) name in the meantime, which is exactly why Pass 1 must pass
+`force=True` into `build_new_filename` for this branch: without it,
+`build_new_filename`'s own already-formatted guard would see that old name
+still matches the `YYYYMMDD_HHMMSS` pattern and hand it back unchanged,
+silently undoing the correction. (This branch's `f.filename` could never look
+already-formatted before this feature existed, so `force=True` is a no-op
+for every other case that reaches it — only a just-demoted hard anchor hits
+the guard.)
 
 ### Hold to repeat — Move up/down buttons
 When the Move up/down toolbar buttons are held down, the move action repeats
@@ -427,23 +588,23 @@ Implementation:
 Do not apply hold-to-repeat to the per-row chevrons — toolbar buttons only.
 
 ### Thumbnail click — open in default app
-In expanded mode only, a single click on a thumbnail cell opens the file in
-its default application via `os.startfile(filepath)`. On Windows this opens
-photos in Photos and videos in the default video player. Because the actual
-file path is passed, Photos loads the file in folder context — left/right
-arrow keys in Photos then navigate through the other files in the same folder,
-which is useful for determining correct ordering of undated files.
+A double-click on a thumbnail cell opens the file in its default application
+via `os.startfile(filepath)`, in both compact and expanded mode. On Windows
+this opens photos in Photos and videos in the default video player. Because
+the actual file path is passed, Photos loads the file in folder context —
+left/right arrow keys in Photos then navigate through the other files in the
+same folder, which is useful for determining correct ordering of undated
+files.
 
-In compact mode, thumbnail clicks are ignored — the click target is too small
-and too easy to trigger accidentally.
+Double-click, not single click, in both modes — a single click is too easy
+to trigger accidentally, especially on the small compact-mode thumbnail.
 
-Implementation: `ThumbnailDelegate` detects `QEvent.MouseButtonRelease` in
-`editorEvent()` only when `self._expanded` is True. It emits a signal
-`open_file_requested = Signal(str)` with the filepath, connected to a slot
-in `MainWindow` that calls `os.startfile(filepath)`. The `_expanded` state
-is passed to `ThumbnailDelegate` via a method `set_expanded(bool)` called
-from the toolbar toggle handler. Do not use double-click — single click is
-the right interaction in expanded mode.
+Implementation: `ThumbnailDelegate` detects `QEvent.MouseButtonDblClick` in
+`editorEvent()`. It emits a signal `open_file_requested = Signal(str)` with
+the filepath, connected to a slot in `MainWindow` that calls
+`os.startfile(filepath)`. `self._expanded` (set via `set_expanded(bool)` from
+the toolbar toggle handler) still controls thumbnail scaling in `paint()`; it
+no longer gates whether a click opens the file.
 
 ### On folder load
 - Stub rows inserted immediately (filename only) so table appears instantly
@@ -616,7 +777,9 @@ file_progress = Signal(int, int)        # metadata files done, total
 attention_required = Signal(int)        # count of files needing attention
 rename_progress = Signal(int, int)      # done, total
 rename_complete = Signal(int, int)      # success_count, error_count
-phase_changed = Signal(bool)            # True = Phase 1, False = Phase 2
+phase_changed = Signal(bool)            # True = strong anchors still pending rename.
+                                         # Informational only (see "No operational
+                                         # phases") — main.py doesn't connect to it.
 metadata_load_error = Signal(str)       # exiftool could not start at all
 ```
 
@@ -624,7 +787,6 @@ metadata_load_error = Signal(str)       # exiftool could not start at all
 
 ## Future features (not MVP — but don't make them impossible to add)
 - Timezone offset per source folder
-- Manual date/time editing per file (with metadata write on apply)
 - Drag and drop reordering
 - Undo/redo
 - Mac support (same codebase, build on Mac)
@@ -645,6 +807,9 @@ metadata_load_error = Signal(str)       # exiftool could not start at all
   instead of one per file — see Threading
 - `media_model.py` — MediaFile dataclass + MediaTableModel, full five-state logic with user_moved, effective_date, interpolation, apply_rename
 - `main.py` — main window, toolbar, table view, all delegates, loading overlay, selection retention on move
+- Editable New filename column, its per-file reset, and per-file manual
+  date/time editing — see "Editable New filename column" and "Per-file
+  date/time editing" under UI behaviour
 
 ## What's next
 1. PyInstaller packaging to `MediaReel.exe`

@@ -142,6 +142,8 @@ MVP — actively used and tested on real event photo collections.
 - Apply rename with resort
 - Fast metadata loading — a 2000-file folder's dates are read in a few seconds and the UI is usable straight away
 - Thumbnail generation (photos, HEIC and video via ffmpeg), loading in the background with a pulsing "Loading…" placeholder
+- Edit a file's proposed new filename directly in its row, and set a file's date and time from a
+  calendar picker — for files whose metadata is wrong (e.g. WhatsApp/shared media)
 - Hold-to-repeat move buttons
 - Expand/compact view toggle
 - Thumbnail click to open in default app
@@ -149,7 +151,6 @@ MVP — actively used and tested on real event photo collections.
 **Planned:**
 - Padlock locking/unlocking per file
 - Mac support
-- Manual date/time editing per file
 - AI-assisted ordering for undated files (vision API)
 - Drag and drop reordering
 
