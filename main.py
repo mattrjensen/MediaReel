@@ -986,40 +986,44 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._btn_open)
         toolbar.addSeparator()
 
+        # Everything that acts on loaded files is always on the toolbar and
+        # just greyed out until there's something for it to act on (no
+        # folder yet, nothing flagged, nothing selected) — controls that
+        # appear and disappear would shift the rest of the row around.
         self._btn_expand = QPushButton('⊞  Expand View')
         self._btn_expand.setStyleSheet(self._btn_style())
+        self._btn_expand.setEnabled(False)
         toolbar.addWidget(self._btn_expand)
         toolbar.addSeparator()
 
         # Files needing ordering: a status label with Prev / Next to step
-        # through them. One container widget, so a single toolbar action
-        # shows/hides all three together (see _set_attention_visible).
+        # through them (see _refresh_attention_controls).
         attention = QWidget()
         attention_layout = QHBoxLayout(attention)
         attention_layout.setContentsMargins(0, 0, 0, 0)
         attention_layout.setSpacing(6)   # same as the toolbar's own spacing
 
-        self._lbl_attention = QLabel('⚠  0 file(s) need ordering')
-        self._lbl_attention.setStyleSheet(self._label_style_warn())
+        self._lbl_attention = QLabel('0 file(s) need ordering')
+        self._lbl_attention.setStyleSheet(self._label_style_muted())
+        self._attention_active = False   # which of the two styles is applied
         attention_layout.addWidget(self._lbl_attention)
 
         self._btn_prev = QPushButton('Prev')
         self._btn_prev.setStyleSheet(self._btn_style())
+        self._btn_prev.setEnabled(False)
         attention_layout.addWidget(self._btn_prev)
 
         self._btn_next = QPushButton('Next')
         self._btn_next.setStyleSheet(self._btn_style())
+        self._btn_next.setEnabled(False)
         attention_layout.addWidget(self._btn_next)
 
-        self._act_attention = toolbar.addWidget(attention)
-        # The separator after the group is hidden with it, or the two
-        # separators either side of a hidden group would sit back to back.
-        self._sep_attention = toolbar.addSeparator()
-        self._set_attention_visible(False)
+        toolbar.addWidget(attention)
+        toolbar.addSeparator()
 
         # Move buttons, led by how many rows they'll act on — they move the
         # whole selection, so the count says what a click is about to do.
-        self._lbl_selected_toolbar = QLabel('')
+        self._lbl_selected_toolbar = QLabel('0 selected')
         self._lbl_selected_toolbar.setStyleSheet(
             'color: #6B7280; font-size: 12px; padding: 0 8px;')
         toolbar.addWidget(self._lbl_selected_toolbar)
@@ -1391,12 +1395,16 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self._lbl_files.setText(f'Loading {count} files…')
         for lbl in (self._lbl_selected, self._lbl_to_rename, self._lbl_flagged,
-                    self._lbl_toolbar_rename, self._lbl_selected_toolbar):
+                    self._lbl_toolbar_rename):
             lbl.setText('')   # counts from the previous folder
+        # Toolbar controls go back to their "nothing yet" state rather than
+        # keeping the previous folder's selection/ordering counts.
+        self._lbl_selected_toolbar.setText('0 selected')
+        self._btn_expand.setEnabled(count > 0)
         self._btn_apply.setEnabled(False)
         self._btn_up.setEnabled(False)
         self._btn_down.setEnabled(False)
-        self._set_attention_visible(False)  # clear stale state from previous folder
+        self._refresh_attention_controls()
         self._overlay.start()
         self._thumb_pulse_timer.start()
 
@@ -1441,23 +1449,23 @@ class MainWindow(QMainWindow):
         self._refresh_attention_controls()
 
     def _refresh_attention_controls(self):
+        """Always shown; amber with a ⚠ while anything needs ordering, plain
+        grey at zero (including before a folder is loaded)."""
         flagged = [i for i, f in enumerate(self._model.files()) if f.needs_attention]
         n = len(flagged)
-        if n > 0:
-            self._lbl_attention.setText(f'⚠  {n} file(s) need ordering')
-            # Greyed out where there's nowhere further to go, rather than
-            # silently doing nothing when clicked. Depends on the current
-            # row as well as the flagged set, so this also runs on
-            # currentChanged (see _connect_signals).
-            self._btn_prev.setEnabled(self._attention_target(-1, flagged) is not None)
-            self._btn_next.setEnabled(self._attention_target(1, flagged) is not None)
-            self._set_attention_visible(True)
-        else:
-            self._set_attention_visible(False)
-
-    def _set_attention_visible(self, visible: bool):
-        self._act_attention.setVisible(visible)
-        self._sep_attention.setVisible(visible)
+        active = n > 0
+        self._lbl_attention.setText(
+            f'⚠  {n} file(s) need ordering' if active else '0 file(s) need ordering')
+        if active != self._attention_active:   # not on every refresh: setStyleSheet is slow-ish
+            self._attention_active = active
+            self._lbl_attention.setStyleSheet(
+                self._label_style_warn() if active else self._label_style_muted())
+        # Greyed out where there's nowhere further to go (which includes
+        # nothing being flagged at all), rather than silently doing nothing
+        # when clicked. Depends on the current row as well as the flagged
+        # set, so this also runs on currentChanged (see _connect_signals).
+        self._btn_prev.setEnabled(self._attention_target(-1, flagged) is not None)
+        self._btn_next.setEnabled(self._attention_target(1, flagged) is not None)
 
     def _on_rename_complete(self, success: int, errors: int):
         # Taken first: the resort below reorders rows, and the view would
@@ -1508,6 +1516,7 @@ class MainWindow(QMainWindow):
         total = len(files)
         self._lbl_files.setText(f'{total} files')
         self._btn_apply.setEnabled(self._model.has_pending_renames())
+        self._btn_expand.setEnabled(total > 0)   # nothing to expand until a folder's loaded
 
         # display_filename, not proposed_filename — see _apply_rename.
         will_rename = sum(
@@ -1518,11 +1527,10 @@ class MainWindow(QMainWindow):
         )
         flagged  = sum(1 for f in files if f.needs_attention)
         selected = sum(1 for f in files if f.selected)
-        # The status bar always shows every count, zero or not (unlike the
-        # toolbar's copy of "to be renamed" and the attention button, which
-        # only appear when there's something to act on). "need ordering"
-        # deliberately matches the toolbar button's wording — same count
-        # (needs_attention), same phrase.
+        # The status bar always shows every count, zero or not (the
+        # toolbar's own "to be renamed" text is the exception: it's blank
+        # at zero). "need ordering" deliberately matches the toolbar label's
+        # wording — same count (needs_attention), same phrase.
         self._lbl_selected.setText(f'  ·  {selected} file(s) selected')
         # Shorter than the status bar's "file(s) selected": the toolbar is
         # nearly full (see setMinimumSize in __init__), and next to the Move
@@ -1572,6 +1580,11 @@ class MainWindow(QMainWindow):
                 background: #BFDBFE; border-color: #BFDBFE; color: white;
             }
         '''
+
+    def _label_style_muted(self) -> str:
+        # Same metrics as _label_style_warn so the label doesn't shift
+        # between the two, and the same grey as the toolbar's other texts.
+        return 'color: #6B7280; font-size: 12px; font-weight: 500; padding: 0 6px;'
 
     def _label_style_warn(self) -> str:
         # Amber like the row highlight it refers to, but deliberately no
