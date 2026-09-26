@@ -114,12 +114,14 @@ class PreviewDelegate(BaseDelegate):
         painter.save()
         self._draw_bg(painter, option, f)
 
-        if f.is_already_formatted:
-            # Hard anchor — not editable, filename is already the source of
-            # truth, so nothing will change. Left empty rather than
-            # repeating the Filename column's value: this column means
-            # "what will this become," and repeating the current name under
-            # that header reads as a rename that isn't actually happening.
+        if f.name_locked:
+            # Hard anchor that hasn't been moved — not editable, filename is
+            # already the source of truth, so nothing will change. Left empty
+            # rather than repeating the Filename column's value: this column
+            # means "what will this become," and repeating the current name
+            # under that header reads as a rename that isn't actually
+            # happening. (Once the user moves it, it can get a pending
+            # rename, so it gets a box like any other file.)
             painter.restore()
             return
 
@@ -168,7 +170,7 @@ class PreviewDelegate(BaseDelegate):
 
     def createEditor(self, parent, option, index):
         f: MediaFile = index.data(MediaFileRole)
-        if f is None or f.is_already_formatted:
+        if f is None or f.name_locked:
             return None
         editor = QLineEdit(parent)
         # Match the painted box's look so opening the editor doesn't cause
@@ -884,7 +886,7 @@ class MediaTableView(QTableView):
                 f: MediaFile = index.data(MediaFileRole)
                 col = index.column()
 
-                if col == COL_PREVIEW and f is not None and not f.is_already_formatted:
+                if col == COL_PREVIEW and f is not None and not f.name_locked:
                     delegate = self.itemDelegateForColumn(COL_PREVIEW)
                     # Just enough of a QStyleOptionViewItem for the
                     # delegate's rect math, which only ever looks at .rect
@@ -969,7 +971,7 @@ class MediaTableView(QTableView):
             model = self.model()
             if index.isValid() and model is not None and index.column() == COL_PREVIEW:
                 f: MediaFile = index.data(MediaFileRole)
-                if f is not None and f.can_clear_filename:
+                if f is not None and not f.name_locked and f.can_clear_filename:
                     delegate = self.itemDelegateForColumn(COL_PREVIEW)
                     opt = QStyleOptionViewItem()
                     opt.rect = self.visualRect(index)

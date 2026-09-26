@@ -242,3 +242,41 @@ class TestPredicates:
         w2 = weak('w2.jpg')
         load(model, [a, w1, w2])
         assert model.attention_count() == 2
+
+
+# ── name_locked — whether the New filename box is hidden/uneditable ──────────
+
+class TestNameLocked:
+    def test_unmoved_hard_anchor_is_locked(self, model):
+        f = hard('20241215_100000_a.jpg', datetime(2024, 12, 15, 10, 0, 0))
+        load(model, [f])
+        assert f.name_locked
+
+    def test_moved_hard_anchor_is_unlocked(self, model):
+        # Moving an already-named file can give it a pending rename, so its
+        # box must be visible and editable rather than silently renaming.
+        a = hard('20241215_090000_a.jpg', datetime(2024, 12, 15, 9, 0, 0))
+        b = hard('20241215_100000_b.jpg', datetime(2024, 12, 15, 10, 0, 0))
+        c = hard('20241215_110000_c.jpg', datetime(2024, 12, 15, 11, 0, 0))
+        d = hard('20241215_120000_d.jpg', datetime(2024, 12, 15, 12, 0, 0))
+        load(model, [a, c, b, d])
+        b.user_moved = True
+        model.recalculate_proposed_filenames()
+        assert not b.name_locked
+        assert b.display_filename != b.filename
+        assert model.has_pending_renames()
+
+    def test_flags_follow_name_locked(self, model):
+        from PySide6.QtCore import Qt
+        from media_model import COL_PREVIEW
+        f = hard('20241215_100000_a.jpg', datetime(2024, 12, 15, 10, 0, 0))
+        load(model, [f])
+        assert not model.flags(model.index(0, COL_PREVIEW)) & Qt.ItemIsEditable
+        f.user_moved = True
+        assert model.flags(model.index(0, COL_PREVIEW)) & Qt.ItemIsEditable
+
+    def test_unmoved_non_hard_files_are_never_locked(self, model):
+        s = strong('IMG_001.jpg', datetime(2024, 12, 15, 10, 0, 0))
+        w = weak('w.jpg')
+        load(model, [s, w])
+        assert not s.name_locked and not w.name_locked

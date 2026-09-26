@@ -126,7 +126,7 @@ Every file is classified into one of five states. These drive the rename logic, 
 
 - **Strong anchor, not moved** — propose rename using own metadata/filename date, full seconds. Becomes `YYYYMMDD_HHMMSS_<stripped_name>`. On Apply, rename only — do not update metadata.
 
-- **Strong anchor, moved** — user has deliberately repositioned this file, overriding its timestamp. Propose rename using interpolated date between nearest anchors, full seconds. On Apply, rename only — do NOT update metadata (preserve original metadata as a record of what the camera said).
+- **Strong anchor, moved** — user has deliberately repositioned this file, overriding its timestamp. Propose rename using interpolated date between nearest anchors, full seconds. On Apply, if the move gave it a new date (re-anchored), rename AND write that date to file metadata — its own date was overridden because it was wrong for this position (e.g. an iOS-edited photo saved as a new file with the edit time), so leaving the old one in the metadata would keep it disagreeing with the filename. If its own date still fits its new position nothing is re-derived: it keeps its name and its metadata is left alone.
 
 - **Weak anchor, not moved** — no rename proposed. Show original filename in grey. Flag as `needs_attention`. No change until user moves the file deliberately.
 
@@ -216,6 +216,17 @@ operational phases") — nothing in `main.py` uses it to gate anything.
 New filename field's "x" is shown: the box holds a real name (not blank, not a
 `---` instruction placeholder). Painting and click handling both use it.
 
+`name_locked` (another property) is `is_already_formatted and not user_moved`
+— whether the New filename cell is empty and uneditable. It is *not* just
+`is_already_formatted`: moving an already-named file makes Pass 1 treat it
+like any moved strong anchor, which can propose a real (re-anchored) rename,
+so it must get a visible, editable, skippable box like every other file with
+a pending rename. Painting (`PreviewDelegate.paint`/`createEditor`), click
+handling (`mousePressEvent`), the "Reset" tooltip and
+`MediaTableModel.flags()` all read it, so they can't drift apart.
+`apply_rename()` clears `user_moved` on every already-formatted file at the
+end so the unlock doesn't outlive an Apply.
+
 ---
 
 ## recalculate_proposed_filenames — three-pass logic
@@ -277,7 +288,7 @@ If two files would get the same proposed filename, append `_01`, `_02` suffixes 
 |---|---|---|
 | Hard anchor | skip | skip |
 | Strong anchor, not moved | yes — prepend own date, full seconds | no |
-| Strong anchor, moved (re-anchored) | yes — prepend averaged date, full seconds | no — preserve original metadata |
+| Strong anchor, moved (re-anchored) | yes — prepend averaged date, full seconds | yes — write new timestamp to file metadata |
 | Weak anchor, moved (interpolated) | yes — prepend interpolated date, full seconds | yes — write new timestamp to file metadata |
 | Weak anchor, not moved | skip | skip |
 | Manually dated (`date_source == 'manual'`) | yes — prepend the entered date, full seconds | yes — write new timestamp to file metadata |
@@ -285,9 +296,10 @@ If two files would get the same proposed filename, append `_01`, `_02` suffixes 
 The manually-dated row isn't really a sixth state in the five-state sense —
 `_is_strong()` already treats `'manual'` as strong, so such a file falls into
 whichever of the first two rows its `user_moved` value puts it in. It's
-listed separately here because it's the one case in those two rows where
-metadata *is* written: the metadata write is decided by
-`f.is_interpolated or f.date_source == DATE_SOURCE_MANUAL`, captured in
+listed separately because its metadata is written even when it isn't
+re-anchored. In short, metadata is written whenever Apply gives a file a
+date other than its own: the decision is
+`f.is_interpolated or f.is_re_anchored or f.date_source == DATE_SOURCE_MANUAL`, captured in
 `apply_rename()` before the immediately-following filename-prefix parse can
 overwrite `date_source` to `'filename'`. Rename destination and target for
 that decision are always `f.display_filename` (the manual filename override
@@ -415,7 +427,7 @@ into account at all; the only per-row distinction left is `needs_attention`.
 | 2 | Filename | Original filename on disk |
 | 3 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
 | 4 | Size | Size in MB to one decimal place (`format_file_size`), right-aligned in a narrow column. A small non-empty file reads `<0.1 MB` rather than a misleading `0.0 MB`; blank until read. See "File size and deleting a file". |
-| 5 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
+| 5 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on unmoved hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
 | 6 | Preview | Thumbnail. Videos show first frame + duration badge. |
 | 7 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
 | 8 | Delete | Trash-can button that deletes that row's file (after a confirmation). See "File size and deleting a file". |
@@ -486,12 +498,15 @@ columns itself, calling `edit(index)` directly. Consequences: F2/Enter no
 longer start an edit, and a click in this column doesn't do normal
 row-selection handling.
 
-- Hard-anchor rows are empty, not editable (`MediaTableModel.flags()` and
-  `mousePressEvent` both check): the filename is already the source of
-  truth, and allowing an edit would let a hard anchor get renamed, which
-  "hard anchor never renames" forbids. (The one way back is the calendar
-  icon, which demotes it out of hard-anchor status first — see "Wrong-
-  metadata hard anchors" under Per-file date/time editing.)
+- Unmoved hard-anchor rows (`MediaFile.name_locked`) are empty, not
+  editable (`MediaTableModel.flags()` and `mousePressEvent` both check): the
+  filename is already the source of truth, and allowing an edit would let a
+  hard anchor get renamed, which "hard anchor never renames" forbids. (The
+  ways back are the calendar icon, which demotes it out of hard-anchor
+  status first — see "Wrong-metadata hard anchors" under Per-file date/time
+  editing — and moving it, below.) **A hard anchor the user moves is
+  unlocked**: it may be re-anchored to a new name, and that pending rename
+  must be visible and skippable (the "x" blanks it = skip), never silent.
 - Editing commits through `model.setData(index, text, Qt.EditRole)` →
   `MediaTableModel.set_manual_filename()`, which sets `f.manual_filename`
   and emits `dataChanged` for just that cell (`Qt.DisplayRole`) — this is

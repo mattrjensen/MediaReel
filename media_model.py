@@ -88,8 +88,8 @@ NeedsAttentionRole = Qt.UserRole + 5
 # message for every state — see "No operational phases" in CLAUDE.md for
 # why this used to differ depending on whether a strong anchor was pending.
 _PLACEHOLDER_NEEDS_ATTENTION = (
-    "--- Put this file in the correct chronological order by moving it up or down, "
-    "or selecting a date from the date picker ---"
+    "--- Move this file up or down, "
+    "or select a date from the date picker ---"
 )
 
 
@@ -190,6 +190,20 @@ class MediaFile:
                 and self.date_source in (DATE_SOURCE_METADATA, DATE_SOURCE_FILENAME,
                                          DATE_SOURCE_MANUAL)
                 and not self.user_moved)
+
+    @property
+    def name_locked(self) -> bool:
+        """True when this file's New filename cell is empty and not editable:
+        it's already named and nothing is trying to change that.
+
+        Moving an already-named file (user_moved) overrides that. A moved
+        one can be re-stamped with a date taken from its new position (see
+        recalculate_proposed_filenames), i.e. it gets a *pending rename* —
+        and a pending rename has to be visible, editable and skippable like
+        any other, not silently applied by "Rename files" behind an empty
+        cell. The one rule the painting, the editor, the click handling and
+        MediaTableModel.flags() all share."""
+        return self.is_already_formatted and not self.user_moved
 
     @property
     def can_clear_filename(self) -> bool:
@@ -591,12 +605,13 @@ class MediaTableModel(QAbstractTableModel):
             base |= Qt.ItemIsUserCheckable
         elif col == COL_PREVIEW:
             row = index.row()
-            # Hard anchors are already renamed — the filename is the source
-            # of truth, so it isn't editable: letting it be edited would
-            # violate "hard anchor never renames". (The Date taken column
-            # isn't an editor at all — its calendar icon opens a popup that
-            # calls setData directly; see MediaTableView.)
-            if row < len(self._files) and not self._files[row].is_already_formatted:
+            # A hard anchor is already renamed — the filename is the source
+            # of truth, so it isn't editable (see MediaFile.name_locked) —
+            # unless the user has moved it, which can give it a pending
+            # rename. (The Date taken column isn't an editor at all — its
+            # calendar icon opens a popup that calls setData directly; see
+            # MediaTableView.)
+            if row < len(self._files) and not self._files[row].name_locked:
                 base |= Qt.ItemIsEditable
         return base
 
@@ -1157,7 +1172,8 @@ class MediaTableModel(QAbstractTableModel):
             dest = src.parent / f.display_filename
             # Captured before the filename-parse below can overwrite
             # date_source to 'filename'.
-            write_metadata = f.is_interpolated or f.date_source == DATE_SOURCE_MANUAL
+            write_metadata = (f.is_interpolated or f.is_re_anchored
+                              or f.date_source == DATE_SOURCE_MANUAL)
 
             if not src.exists():
                 errors += 1
@@ -1199,6 +1215,14 @@ class MediaTableModel(QAbstractTableModel):
 
             self.rename_progress.emit(done, total)
             QCoreApplication.processEvents()
+
+        # A hard anchor the user moved but whose name didn't change (moved
+        # within order, or its rename was skipped/failed) wasn't in `pending`,
+        # so its user_moved flag would otherwise outlive this Apply and keep
+        # its name unlocked. Apply is the checkpoint that resets it.
+        for f in self._files:
+            if f.is_already_formatted:
+                f.user_moved = False
 
         if self._files:
             tl = self.index(0, 0)
