@@ -980,7 +980,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._btn_open)
         toolbar.addSeparator()
 
-        self._btn_expand = QPushButton('⊞  Expand')
+        self._btn_expand = QPushButton('⊞  Expand View')
         self._btn_expand.setStyleSheet(self._btn_style())
         toolbar.addWidget(self._btn_expand)
         toolbar.addSeparator()
@@ -1118,11 +1118,18 @@ class MainWindow(QMainWindow):
         ''')
         self.setStatusBar(self._status)
 
-        self._lbl_files   = QLabel('No folder loaded')
-        self._lbl_flagged = QLabel('')
+        # Each label after the first carries its own leading "  ·  "
+        # separator in its text and is empty when there's nothing to say,
+        # so nothing dangles when a count is zero.
+        self._lbl_files     = QLabel('No folder loaded')
+        self._lbl_selected  = QLabel('')
+        self._lbl_to_rename = QLabel('')
+        self._lbl_flagged   = QLabel('')
 
         self._status.addWidget(self._lbl_files)
+        self._status.addWidget(self._lbl_to_rename)
         self._status.addWidget(self._lbl_flagged)
+        self._status.addWidget(self._lbl_selected)
 
     def _connect_signals(self):
         self._btn_open.clicked.connect(self._open_folder)
@@ -1312,10 +1319,10 @@ class MainWindow(QMainWindow):
         self._expanded = not self._expanded
         if self._expanded:
             THUMB_W, THUMB_H, ROW_H = EXPANDED_THUMB_W, EXPANDED_THUMB_H, EXPANDED_ROW_H
-            self._btn_expand.setText('⊟  Compact')
+            self._btn_expand.setText('⊟  Compact View')
         else:
             THUMB_W, THUMB_H, ROW_H = COMPACT_THUMB_W, COMPACT_THUMB_H, COMPACT_ROW_H
-            self._btn_expand.setText('⊞  Expand')
+            self._btn_expand.setText('⊞  Expand View')
         self._thumb_delegate.set_expanded(self._expanded)
         self._date_delegate.set_expanded(self._expanded)
         self._table.verticalHeader().setDefaultSectionSize(ROW_H)
@@ -1329,6 +1336,9 @@ class MainWindow(QMainWindow):
         self._progress.setValue(0)
         self._progress.setVisible(True)
         self._lbl_files.setText(f'Loading {count} files…')
+        for lbl in (self._lbl_selected, self._lbl_to_rename, self._lbl_flagged,
+                    self._lbl_toolbar_rename):
+            lbl.setText('')   # counts from the previous folder
         self._btn_apply.setEnabled(False)
         self._btn_up.setEnabled(False)
         self._btn_down.setEnabled(False)
@@ -1380,12 +1390,15 @@ class MainWindow(QMainWindow):
         files = self._model.files()
         n = sum(1 for f in files if f.needs_attention)
         if n > 0:
-            self._btn_attention.setText(f'⚠  {n} file(s) need positioning')
+            self._btn_attention.setText(f'⚠  {n} file(s) need ordering')
             self._act_attention.setVisible(True)
         else:
             self._act_attention.setVisible(False)
 
     def _on_rename_complete(self, success: int, errors: int):
+        # Taken first: the resort below reorders rows, and the view would
+        # otherwise be left wherever that lands it.
+        scroll_pos = self._table.verticalScrollBar().value()
         if errors == 0:
             QMessageBox.information(
                 self, 'Done',
@@ -1401,8 +1414,8 @@ class MainWindow(QMainWindow):
         self._model._sort_by_filename()
         self._model.recalculate_proposed_filenames()
         self._refresh_status()
-        self._table.scrollToTop()
-        
+        self._table.verticalScrollBar().setValue(scroll_pos)
+
 
     def _on_selection_changed(self, selected, deselected):
         rows = {idx.row() for idx in self._table.selectedIndexes()}
@@ -1439,8 +1452,16 @@ class MainWindow(QMainWindow):
             and not f.display_filename.startswith('---')
             and f.display_filename != ''
         )
-        flagged = sum(1 for f in files if f.needs_attention)
-        self._lbl_flagged.setText(f'  ·  {flagged} flagged' if flagged else '')
+        flagged  = sum(1 for f in files if f.needs_attention)
+        selected = sum(1 for f in files if f.selected)
+        # The status bar always shows every count, zero or not (unlike the
+        # toolbar's copy of "to be renamed" and the attention button, which
+        # only appear when there's something to act on). "need ordering"
+        # deliberately matches the toolbar button's wording — same count
+        # (needs_attention), same phrase.
+        self._lbl_selected.setText(f'  ·  {selected} file(s) selected')
+        self._lbl_to_rename.setText(f'  ·  {will_rename} file(s) to be renamed')
+        self._lbl_flagged.setText(f'  ·  {flagged} file(s) need ordering')
         self._lbl_toolbar_rename.setText(
             f'{will_rename} file(s) to be renamed.' if will_rename else '')
         self._refresh_attention_button()

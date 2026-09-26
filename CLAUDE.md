@@ -305,9 +305,13 @@ appear in correct alphabetical/chronological order alongside any other
 already-formatted files. Remaining unmoved weak anchors stay flagged at the
 end. This resort is triggered from `_on_rename_complete` in `main.py` after
 the success/error dialog is dismissed.
-After the resort and recalculate, scroll the table back to the top via
-`self._table.scrollToTop()` so the user sees the newly renamed files
-from the beginning of the list.
+The vertical scroll position is preserved across all of this:
+`_on_rename_complete` reads `verticalScrollBar().value()` before anything
+else and sets it back after the resort and recalculate. (It used to
+`scrollToTop()` so newly renamed files were visible from the start of the
+list, but that threw away wherever the user was working. Note this restores
+the scrollbar *position*, not the *rows* under it — the resort can move
+renamed files elsewhere, so the same offset may now show different files.)
 
 ### Apply rename confirmation dialog
 One message, always:
@@ -415,9 +419,24 @@ into account at all; the only per-row distinction left is `needs_attention`.
 ### Toolbar
 - **Open folder** — opens file picker, loads folder, shows spinner overlay while metadata reads
 - **Move up / Move down** — act on all selected rows as a group, maintaining relative order within group. Selection follows the moved rows.
-- **⊞ Expand / ⊟ Compact** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Sits to the left of Apply rename. In expanded mode, clicking a thumbnail opens the file in its default app via `os.startfile(filepath)`.
+- **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Sits to the left of Apply rename. In expanded mode, clicking a thumbnail opens the file in its default app via `os.startfile(filepath)`.
+- **`{n} file(s) to be renamed.`** — grey text just left of Apply rename; empty when nothing's pending. (Also in the status bar, below.)
 - **Apply rename** — enabled as soon as any file has a pending rename. Warns if any files still need attention. Confirms before proceeding.
-- **N files need attention** — amber warning button, visible when any file has `needs_attention=True`. Clicking jumps to first such row.
+- **`⚠ {n} file(s) need ordering`** — amber warning button, visible when any file has `needs_attention=True`. Clicking jumps to first such row.
+
+### Status bar
+Left to right: `{n} files`, `{y} file(s) to be renamed`, `{z} file(s) need
+ordering`, `{x} file(s) selected` — always all four once a folder is
+loaded, **including zeros** (unlike the toolbar's copy of the rename count
+and the attention button, which only appear when there's something to act
+on). Each after the first carries its own leading `  ·  ` separator in its
+label text. All are set from `MainWindow._refresh_status()`, and blanked in
+`_on_load_started` so a previous folder's counts don't linger during a load.
+
+`{y}` counts files whose `display_filename` differs from `filename` (same
+rule as the Apply dialog and the toolbar text). `{z}` is the same
+`needs_attention` count as the toolbar button and uses the same phrase, so
+the two always read alike.
 
 ### Row height toggle state
 - Default: `self._expanded = False`
