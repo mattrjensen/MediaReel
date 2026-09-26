@@ -67,8 +67,15 @@ IsInterpolatedRole = Qt.UserRole + 3
 IsReAnchoredRole   = Qt.UserRole + 4
 NeedsAttentionRole = Qt.UserRole + 5
 
-_PLACEHOLDER_PHASE1 = ("--- Rename highlighted files before you move this file ---")
-_PLACEHOLDER_PHASE2 = '--- Move file into chronological order ---'
+# Shown on a weak, unmoved file's New filename box — there's no rename to
+# propose until the user acts on it, one way or the other: reposition it
+# (chevrons or drag) or give it a trusted date via the calendar icon. One
+# message for every state — see "No operational phases" in CLAUDE.md for
+# why this used to differ depending on whether a strong anchor was pending.
+_PLACEHOLDER_NEEDS_ATTENTION = (
+    "--- Put this file in the correct chronological order by moving it up or down, "
+    "or selecting a date from the date picker ---"
+)
 
 
 # ── MediaFile dataclass ─────────────────────────────────────────────────────
@@ -121,6 +128,25 @@ class MediaFile:
     # whenever the file's date is edited (a stale manual name from before
     # a date correction would no longer match).
     manual_filename: Optional[str] = None
+
+    # This file's position the last time _sort_by_filename() ran (initial
+    # load, or the resort after an Apply) — stamped there, never touched
+    # anywhere else. It's the "undo move" baseline: restoring a moved weak
+    # file to where it was is only ever meant to mean "since the last
+    # Apply," not "since the folder was first opened," so this is reset
+    # exactly when that baseline should move forward. See
+    # MediaTableModel.undo_move().
+    original_index: int = 0
+
+    # (date, date_source, is_already_formatted) from just before the first
+    # date-picker pick since the last Apply/load — None if no date has been
+    # picked since then. Unlike a drag, picking a date overwrites real data
+    # (and can demote a hard anchor), so undoing it needs this snapshot to
+    # restore, not just a position to move back to. Set once and left alone
+    # across repeated picks on the same file, so "x" always undoes back to
+    # the true original rather than one step at a time. See
+    # MediaTableModel.undo_manual_date().
+    manual_date_undo: Optional[tuple] = None
 
     def __post_init__(self):
         if not self.proposed_filename:
@@ -580,10 +606,10 @@ class MediaTableModel(QAbstractTableModel):
         picker. Treated as a strong anchor (see _is_strong) sourced from
         the user rather than metadata — for files like WhatsApp/shared
         media whose embedded metadata is wrong. Clears user_moved, since
-        the chosen date is now the authoritative position, and any manual
-        filename override, since it would otherwise show a stale name.
-        Clearing that override also keeps a file that has just become a
-        Phase 1 gate from carrying a blank one (see set_manual_filename).
+        the chosen date is now the authoritative position — and, being
+        not-moved, it still counts as a real anchor for its neighbours'
+        interpolation, unlike a dragged file. Clears any manual filename
+        override too, since it would otherwise show a stale name.
 
         Also clears is_already_formatted, demoting a hard anchor back to an
         ordinary strong anchor. A hard anchor is only trustworthy because
@@ -594,16 +620,70 @@ class MediaTableModel(QAbstractTableModel):
         Pass 1 as a strong-anchor-not-moved file: build_new_filename strips
         the old (wrong) YYYYMMDD_HHMMSS prefix and proposes a new one from
         the corrected date, and the New filename box reappears (it's driven
-        by the same flag) so it can be renamed for real on the next Apply."""
+        by the same flag) so it can be renamed for real on the next Apply.
+
+        Also relocates the file to sit chronologically among the others,
+        the same as if the user had dragged it there — Pass 1 treats a
+        not-moved strong anchor as already trustworthy and already in a
+        reasonable position, an assumption a picked date shouldn't leave
+        false. See _reposition_by_date().
+
+        Before any of that, snapshots (date, date_source, is_already_formatted)
+        into manual_date_undo, but only if nothing's snapshotted there
+        already — a second pick on the same file (before the next Apply)
+        shouldn't overwrite the snapshot with the *first* pick's result,
+        or "x" would only ever undo one step instead of back to how the
+        file actually started. See undo_manual_date()."""
         if row < 0 or row >= len(self._files) or dt is None:
             return
         f = self._files[row]
+        if f.manual_date_undo is None:
+            f.manual_date_undo = (f.date, f.date_source, f.is_already_formatted)
         f.date                 = dt
         f.date_source          = DATE_SOURCE_MANUAL
         f.user_moved           = False
         f.manual_filename      = None
         f.is_already_formatted = False
+        self._reposition_by_date(row, dt)   # emits its own layoutChanged
         self.recalculate_proposed_filenames()
+
+    def _reposition_by_date(self, row: int, dt: datetime):
+        """Move self._files[row] to sit between the two files whose current
+        displayed date brackets dt — same idea as a manual drag, just
+        driven by the picked date instead of a chevron click. Only hard
+        anchors and strong-sourced files (_is_strong) count as reference
+        points: a weak file's displayed date is either nonexistent
+        (needs_attention) or itself interpolated from its neighbours, so
+        it's not a trustworthy place to measure from — the same reasoning
+        _find_anchor_before/_after already apply when picking anchors.
+
+        Finds the qualifying anchor with the *smallest* date that's still
+        later than dt, not just the first one encountered in list order:
+        the list isn't guaranteed to already be in chronological order (a
+        fresh alphabetical load, for instance, routinely isn't), so
+        stopping at the first later-dated anchor can land on one that's
+        much further away than the true nearest one, which might sit
+        later in the list.
+
+        Wrapped in layoutAboutToBeChanged/_remap_persistent_indices/
+        layoutChanged rather than a bare layoutChanged.emit(), so the
+        selection model's own bookkeeping travels with the file instead of
+        being left pointing at whatever row number it used to be — see
+        _remap_persistent_indices for what goes wrong without this."""
+        self.layoutAboutToBeChanged.emit()
+        f = self._files.pop(row)
+        insert_at = len(self._files)
+        best_dt = None
+        for i, other in enumerate(self._files):
+            if not _is_strong(other):
+                continue
+            other_dt = other.effective_date or other.date
+            if other_dt is not None and other_dt > dt and (best_dt is None or other_dt < best_dt):
+                best_dt = other_dt
+                insert_at = i
+        self._files.insert(insert_at, f)
+        self._remap_persistent_indices(row, insert_at)
+        self.layoutChanged.emit()
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -727,6 +807,101 @@ class MediaTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
         self.recalculate_proposed_filenames()
 
+    def _remap_persistent_indices(self, from_row: int, to_row: int):
+        """Tell Qt how row numbers just shifted after moving one file from
+        from_row to to_row in self._files, so persistent indices — the
+        selection model's own bookkeeping, the current index, any open
+        editor — travel with their items instead of being left pointing at
+        whatever row number they used to be. Call after mutating
+        self._files, bracketed by layoutAboutToBeChanged/layoutChanged.
+
+        This matters: a bare layoutChanged.emit() after a manual pop+insert
+        (which _reinsert_at_original_index and _reposition_by_date used to
+        do) leaves the selection model's persistent indices referencing
+        their old row numbers. Whatever file now happens to sit at each of
+        those row numbers reads back as "selected" even though nobody
+        selected it — this is what caused several unrelated files to show
+        up selected (blue border, checked box) after a single-row undo."""
+        if from_row == to_row:
+            return
+        if from_row < to_row:
+            remap = {r: r - 1 for r in range(from_row + 1, to_row + 1)}
+        else:
+            remap = {r: r + 1 for r in range(to_row, from_row)}
+        remap[from_row] = to_row
+        old_list = self.persistentIndexList()
+        new_list = [self.index(remap.get(idx.row(), idx.row()), idx.column())
+                    for idx in old_list]
+        self.changePersistentIndexList(old_list, new_list)
+
+    def _reinsert_at_original_index(self, row: int):
+        """Move self._files[row] to the position its original_index implies
+        relative to the other *unmoved* files. A file some other move has
+        also displaced isn't a reliable reference point for where it used
+        to be, so it's skipped when looking for the insertion point (though
+        it isn't touched — it just isn't used to decide where this one
+        lands). Shared by undo_move() and undo_manual_date(), whose only
+        difference is what else about the file they restore before
+        repositioning it."""
+        self.layoutAboutToBeChanged.emit()
+        f = self._files.pop(row)
+        insert_at = len(self._files)
+        for i, other in enumerate(self._files):
+            if other.user_moved:
+                continue
+            if other.original_index > f.original_index:
+                insert_at = i
+                break
+        self._files.insert(insert_at, f)
+        self._remap_persistent_indices(row, insert_at)
+        self.layoutChanged.emit()
+
+    def undo_move(self, row: int):
+        """Put a moved weak file back where it was (since the last Apply or
+        load), without disturbing any other file's position — the "x" on an
+        interpolated (weak, moved) file's New filename box calls this
+        instead of just blanking it, since for this state "undo" means undo
+        the move that produced the interpolated name in the first place.
+
+        Only ever called on is_interpolated files (weak + moved); a moved
+        strong anchor's re-anchoring is a different flag (is_re_anchored)
+        and isn't affected by this."""
+        if row < 0 or row >= len(self._files):
+            return
+        f = self._files[row]
+        if not (f.is_interpolated and f.user_moved):
+            return
+        f.user_moved = False
+        f.manual_filename = None
+        self._reinsert_at_original_index(row)
+        self.recalculate_proposed_filenames()
+
+    def undo_manual_date(self, row: int):
+        """Undo a date-picker correction — the "x" on a file whose date came
+        from the picker calls this instead of just blanking it. Blanking
+        would leave the file in an odd, not-really-useful state: a
+        corrected date and badge with no proposed name to go with them.
+        What "undo" should mean here is backing out of the correction
+        entirely, the same as it does for a dragged file.
+
+        Unlike undo_move, this doesn't require user_moved — set_manual_date
+        deliberately leaves it False, so a corrected date still counts as a
+        real anchor for its neighbours' interpolation instead of being
+        treated as suspect the way a dragged file is (see
+        MediaFile.manual_date_undo). Restores date/date_source/
+        is_already_formatted from that snapshot, then repositions the file
+        back the same way undo_move does."""
+        if row < 0 or row >= len(self._files):
+            return
+        f = self._files[row]
+        if f.manual_date_undo is None:
+            return
+        f.date, f.date_source, f.is_already_formatted = f.manual_date_undo
+        f.manual_date_undo = None
+        f.manual_filename = None
+        self._reinsert_at_original_index(row)
+        self.recalculate_proposed_filenames()
+
     def get_selected_indices(self) -> List[int]:
         return [i for i, f in enumerate(self._files) if f.selected]
 
@@ -750,9 +925,7 @@ class MediaTableModel(QAbstractTableModel):
         n           = len(files)
         if n == 0:
             return
-        placeholder = (_PLACEHOLDER_PHASE1
-                       if self.has_pending_strong_renames()
-                       else _PLACEHOLDER_PHASE2)
+        placeholder = _PLACEHOLDER_NEEDS_ATTENTION
 
         # Reset effective_date so anchor lookups during this pass only see
         # values set in this pass (forward neighbours fall back to f.date).
@@ -1125,6 +1298,15 @@ class MediaTableModel(QAbstractTableModel):
         return None
 
     def _sort_by_filename(self):
-        """Sort file list alphabetically by filename."""
+        """Sort file list alphabetically by filename. Also stamps the new
+        "since the last Apply (or load)" baseline that undo_move() restores
+        a moved weak file to (MediaFile.original_index), and clears
+        manual_date_undo for every file: a date-picker correction is only
+        undoable up to the next Apply, the same "between Apply clicks"
+        scope as an undone move — once Apply has run, that's the new
+        checkpoint, whether or not this particular file was touched by it."""
         self._files.sort(key=lambda f: f.filename.lower())
+        for i, f in enumerate(self._files):
+            f.original_index = i
+            f.manual_date_undo = None
         self.layoutChanged.emit()

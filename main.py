@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QProgressDialog, QStyledItemDelegate,
     QStyleOptionViewItem, QStyleOptionButton, QProgressBar, QStyle,
     QSizePolicy, QLineEdit, QCalendarWidget, QDialog, QHBoxLayout,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QToolTip
 )
 
 from media_model import (
@@ -601,11 +601,14 @@ class LoadingOverlay(QWidget):
 # you). Qt.Popup makes it close on any click outside it (and on Escape).
 class DateTimePickerPopup(QDialog):
 
-    committed = Signal(object)   # a python datetime
+    committed     = Signal(object)   # a python datetime, from "Set date and time"
+    draft_changed = Signal(object)   # a python datetime, when closed any other way
 
     def __init__(self, initial: datetime, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setAttribute(Qt.WA_DeleteOnClose)
+        self._committed = False
+        self._initial   = initial
         # The app palette's Highlight is a very pale blue (fine for table
         # rows, too faint to show what's picked), so selections get the
         # app's solid blue.
@@ -628,6 +631,16 @@ class DateTimePickerPopup(QDialog):
         self._calendar = QCalendarWidget()
         self._calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self._calendar.setSelectedDate(QDate(initial.year, initial.month, initial.day))
+        # QCalendarWidget's internal grid paints the selected day's text
+        # from the widget's own palette (QPalette.HighlightedText), not
+        # from the "selection-color" stylesheet property below — that
+        # property has no effect on it, which is why the selected day was
+        # still showing dark text on the blue background despite it being
+        # set. Setting the palette directly is what actually reaches it.
+        cal_palette = self._calendar.palette()
+        cal_palette.setColor(QPalette.Highlight, QColor('#2563EB'))
+        cal_palette.setColor(QPalette.HighlightedText, QColor('#FFFFFF'))
+        self._calendar.setPalette(cal_palette)
         body.addWidget(self._calendar)
 
         self._hours   = self._time_column(24, initial.hour)
@@ -706,8 +719,27 @@ class DateTimePickerPopup(QDialog):
             column.scrollToItem(column.currentItem(), QAbstractItemView.PositionAtCenter)
 
     def _commit(self):
+        self._committed = True
         self.committed.emit(self.value())
         self.close()
+
+    def closeEvent(self, event):
+        # Closed any way other than "Set date and time" — Cancel, Escape,
+        # a click outside (Qt.Popup's own auto-dismiss), or the whole app
+        # losing focus to something else (a notification, say), which is
+        # what this exists for: that shouldn't discard whatever was being
+        # picked. draft_changed carries the in-progress value out so the
+        # next popup opened for this same file can pick up where this one
+        # left off — see MediaTableView._open_date_picker.
+        #
+        # Only if it actually changed from what this popup opened with:
+        # MediaTableView keeps just one draft slot (deliberately — see
+        # there), so a no-op open-then-close (just glancing at a file's
+        # date) would otherwise silently evict a real draft left behind by
+        # a different file.
+        if not self._committed and self.value() != self._initial:
+            self.draft_changed.emit(self.value())
+        super().closeEvent(event)
 
     def show_near(self, anchor: QRect):
         """Show below the anchor rect (global coordinates), or above it if
@@ -735,18 +767,48 @@ class MediaTableView(QTableView):
     trigger setting can't express. editTriggers is set to NoEditTriggers in
     MainWindow for exactly this reason."""
 
+    # (filepath, datetime) of the last picker's uncommitted selection, or
+    # None. Deliberately just one slot, not a dict of every file ever
+    # opened — a draft only matters while you're still mid-edit on that one
+    # file; opening the picker for a different file has nothing to do with
+    # it and should start fresh, not carry around bookkeeping for files
+    # nobody's mid-edit on any more. See _open_date_picker.
+    _date_draft = None
+
     def _open_date_picker(self, index, icon_rect: QRect):
         f: MediaFile = index.data(MediaFileRole)
         initial = (f.effective_date or f.date) if f else None
+        # Resume an interrupted edit on this same file (popup closed by
+        # something other than "Set date and time" — Escape, a stray
+        # click, the app losing focus to a notification) — but only for
+        # this file; a draft from a different file is stale and ignored.
+        if f is not None and self._date_draft is not None and self._date_draft[0] == f.filepath:
+            initial = self._date_draft[1]
         popup = DateTimePickerPopup(initial or datetime.now(), self)
         pidx = QPersistentModelIndex(index)
 
         def commit(dt):
             model = self.model()
-            if model is not None and pidx.isValid():
+            if model is not None and pidx.isValid() and f is not None:
                 model.setData(model.index(pidx.row(), pidx.column()), dt, Qt.EditRole)
+                self._date_draft = None   # applied for real — no draft left to remember
+                # set_manual_date() repositions the file to its new
+                # chronological spot (see MediaTableModel._reposition_by_date)
+                # — same as a manual drag, so follow it the same way.
+                new_row = next(
+                    (i for i, mf in enumerate(model.files()) if mf is f),
+                    None)
+                if new_row is not None:
+                    new_idx = model.index(new_row, COL_FILENAME)
+                    self.scrollTo(new_idx, QAbstractItemView.PositionAtCenter)
+                    self.setCurrentIndex(new_idx)
+
+        def draft(dt):
+            if f is not None:
+                self._date_draft = (f.filepath, dt)
 
         popup.committed.connect(commit)
+        popup.draft_changed.connect(draft)
         anchor = QRect(self.viewport().mapToGlobal(icon_rect.topLeft()), icon_rect.size())
         popup.show_near(anchor)
 
@@ -774,13 +836,32 @@ class MediaTableView(QTableView):
                     opt = QStyleOptionViewItem()
                     opt.rect = self.visualRect(index)
                     # Same test as PreviewDelegate.paint uses to draw the
-                    # icon, so an unpainted icon can't be clicked. '' means
-                    # "clear the box" — the model decides what that means
-                    # for this file (skip it, or for a strong anchor still
-                    # waiting to be renamed, restore its metadata name).
+                    # icon, so an unpainted icon can't be clicked.
                     if (f.can_clear_filename
                             and delegate._reset_icon_rect(opt).contains(pos)):
-                        model.setData(index, '', Qt.EditRole)
+                        if f.is_interpolated:
+                            # Weak + moved: the name only exists because of
+                            # the move, so "clear" means undo the move
+                            # (back to wherever it sat since the last Apply
+                            # or load), not just blank the box.
+                            model.undo_move(index.row())
+                        elif f.manual_date_undo is not None:
+                            # Its date came from the picker: blanking
+                            # wouldn't restore the date/badge/format it had
+                            # before, so "clear" means undo the correction
+                            # entirely instead.
+                            model.undo_manual_date(index.row())
+                        else:
+                            # Blank always means "skip this file on Apply."
+                            model.setData(index, '', Qt.EditRole)
+                            return
+                        new_row = next(
+                            (i for i, mf in enumerate(model.files()) if mf is f),
+                            None)
+                        if new_row is not None:
+                            new_idx = model.index(new_row, COL_FILENAME)
+                            self.scrollTo(new_idx, QAbstractItemView.EnsureVisible)
+                            self.setCurrentIndex(new_idx)
                         return
                     self.setCurrentIndex(index)
                     self.edit(index)
@@ -805,6 +886,27 @@ class MediaTableView(QTableView):
                     # selection click.
 
         super().mousePressEvent(event)
+
+    def viewportEvent(self, event):
+        # A tooltip just for the reset icon: it's labelled "x", which reads
+        # as "clear this text" — true for most files, but for a moved weak
+        # file it undoes the move instead (see mousePressEvent). "Reset"
+        # covers both without claiming it's always just a text clear.
+        if event.type() == QEvent.ToolTip:
+            pos = event.pos()
+            index = self.indexAt(pos)
+            model = self.model()
+            if index.isValid() and model is not None and index.column() == COL_PREVIEW:
+                f: MediaFile = index.data(MediaFileRole)
+                if f is not None and f.can_clear_filename:
+                    delegate = self.itemDelegateForColumn(COL_PREVIEW)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    if delegate._reset_icon_rect(opt).contains(pos):
+                        QToolTip.showText(event.globalPos(), 'Reset', self)
+                        return True
+            QToolTip.hideText()
+        return super().viewportEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)

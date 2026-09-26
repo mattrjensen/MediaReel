@@ -184,6 +184,18 @@ manual_filename: str | None    # user override from the editable New filename
                                # to exactly that. See display_filename and
                                # "Editable New filename column" under UI
                                # behaviour.
+original_index: int            # this file's position the last time
+                               # _sort_by_filename() ran (initial load, or the
+                               # resort after Apply). The "undo move" baseline
+                               # for a moved weak file's "x" — see
+                               # MediaTableModel.undo_move().
+manual_date_undo: tuple | None  # (date, date_source, is_already_formatted)
+                               # from just before the first date-picker pick
+                               # since the last Apply/load, or None if no
+                               # pick has happened since then. The "undo a
+                               # date correction" snapshot for a manually-
+                               # dated file's "x" — see
+                               # MediaTableModel.undo_manual_date().
 ```
 
 `display_filename` (property, not a stored field) is what's actually shown and
@@ -455,20 +467,38 @@ row-selection handling.
   the click position can't be forwarded to the editor anyway.)
 - **The "x"** is shown whenever the box holds a real name
   (`MediaFile.can_clear_filename`) — not when it's blank (nothing to clear)
-  or showing a `---` instruction placeholder (not a name). Clicking it always
-  sends `''` to the model (`setData(index, '', Qt.EditRole)` →
-  `MediaTableModel.set_manual_filename()`), and blank always means the same
-  thing regardless of the file's state: **skip this file on Apply** —
-  `apply_rename()`'s pending filter, `has_pending_renames()`, and the status-
-  bar/dialog counts in `main.py` (`_refresh_status`, `_apply_rename`) all
-  read `display_filename`, which is blank once skipped. Emptying the field
-  by hand in the editor does the same thing as clicking the "x". Paint
-  (`PreviewDelegate.paint`) and hit-test (`MediaTableView.mousePressEvent`)
+  or showing a `---` instruction placeholder (not a name). What clicking it
+  does depends on *why* the box has a value (`MediaTableView.mousePressEvent`):
+  - **A weak file that's been moved** (`is_interpolated` — its name only
+    exists *because* it was moved) — calls `MediaTableModel.undo_move()`
+    instead of blanking: puts the file back where it sat since the last
+    Apply or load, without disturbing any other file's own move, and clears
+    `user_moved`/`manual_filename` so it falls back to `needs_attention`
+    (the placeholder) exactly as if it had never been moved. See "Undoing a
+    weak file's move" below.
+  - **A file whose date came from the picker** (`manual_date_undo` is set)
+    — calls `MediaTableModel.undo_manual_date()` instead of blanking:
+    blanking would leave a corrected date/badge with no proposed name to
+    go with them, which isn't a useful state, so "x" backs the correction
+    out entirely instead — date, date_source and (for a hard anchor)
+    is_already_formatted all revert, and the file repositions back the
+    same way a moved file does. See "Undoing a date-picker correction"
+    below.
+  - **Everything else** (strong anchors from metadata/filename, anything
+    not covered above) sends `''` to the model
+    (`setData(index, '', Qt.EditRole)` → `set_manual_filename()`), which
+    means **skip this file on Apply** — `apply_rename()`'s pending filter,
+    `has_pending_renames()`, and the status-bar/dialog counts in `main.py`
+    (`_refresh_status`, `_apply_rename`) all read `display_filename`, which
+    is blank once skipped. Emptying the field by hand in the editor does
+    the same thing as clicking the "x" here.
+
+  Paint (`PreviewDelegate.paint`) and hit-test (`MediaTableView.mousePressEvent`)
   share `can_clear_filename` and `_reset_icon_rect`, so an unpainted icon
   can't be clicked and the two can't drift apart.
 
-  This used to special-case a strong anchor still waiting to be renamed —
-  blanking it would leave it stuck forever, since Move was disabled while
+  Blanking used to special-case a strong anchor still waiting to be renamed
+  — blanking it would leave it stuck forever, since Move was disabled while
   any such file was pending and Apply skips a blank box, so there'd be no
   route left to resolve it. That's no longer true (see "No operational
   phases"): Move is never disabled, so the user can always reposition a
@@ -484,6 +514,109 @@ row-selection handling.
   already-taken path raises, gets caught, and counts as one of the errors
   in the existing "N failed" dialog — not silent data loss, just not
   proactively prevented or explained as a collision.
+
+#### Undoing a weak file's move
+`MediaTableModel.undo_move(row)` puts a moved weak file back where it was
+*since the last Apply or load* — not since the folder was first opened.
+That baseline is `MediaFile.original_index`, stamped 0..N-1 by
+`_sort_by_filename()` every time it runs, which is exactly the two moments
+that should reset it: right after the initial load, and right after
+`_on_rename_complete`'s resort. Nothing else touches it.
+
+Relocating the file uses that baseline, not its absolute row position at
+the time it was moved, and it only ever repositions *this* file — done by
+the shared helper `_reinsert_at_original_index(row)` (also used by
+`undo_manual_date`, below):
+1. Remove it from the list.
+2. Scan the remaining files for the first one that (a) hasn't itself been
+   `user_moved` and (b) has a larger `original_index` — insert right
+   before it (append at the end if none qualify). Scanning left to right
+   and stopping at the first qualifying file is safe here specifically
+   because unmoved files' *relative* order to each other never changes —
+   nothing ever reorders two unmoved files against one another, only moves
+   insert other files around them — so among unmoved files, list order and
+   original_index order are always the same thing. (`_reposition_by_date`,
+   used for a date-picker pick, can't rely on this same shortcut — see its
+   own note on why it has to find the true nearest anchor instead of the
+   first one encountered.)
+3. Tell Qt about the move (`_remap_persistent_indices`, next) before the
+   caller clears `user_moved`/`manual_filename` and calls
+   `recalculate_proposed_filenames()` — with `user_moved` cleared and the
+   file still weak, Pass 1 puts it back in `needs_attention` (the
+   placeholder), exactly as if it had never been moved.
+
+Step 2 deliberately **skips other moved files** when looking for the
+insertion point, even though it doesn't touch them: a file some other move
+has *also* displaced isn't sitting at its own original position any more,
+so its current position isn't a trustworthy reference for where *this*
+file used to be relative to it. Anchoring only on still-unmoved files is
+what makes "restore this one file" well-defined independent of whatever
+other reordering the user has done — the earlier design this replaced
+would have needed to track and restore *everyone's* history to answer "put
+it back," which is exactly the complexity this sidesteps.
+
+**`_remap_persistent_indices(from_row, to_row)`** — bracketed by
+`layoutAboutToBeChanged`/`layoutChanged` around the actual `pop`/`insert` in
+`_reinsert_at_original_index` and `_reposition_by_date` — is what makes this
+safe for an active selection. A bare `layoutChanged.emit()` after manually
+mutating `self._files` tells the view "something changed, repaint," but
+doesn't tell Qt's selection model *which rows moved where* — the
+selection's own persistent indices keep referencing whatever row numbers
+they used to, and after the reorder those numbers belong to different
+files. In practice this surfaced as several unrelated files appearing
+selected (blue border, checked box) after a single-row undo. The fix builds
+an old-row → new-row mapping for every row shifted by the move, then calls
+`self.changePersistentIndexList()` so every persistent index Qt is
+tracking — selection, current index, an open editor — travels with its
+item instead of being left behind pointing at a stale row number.
+`move_rows()` doesn't need this: `main.py`'s `_move()` already reconstructs
+selection manually after every call (block signals, move, re-select at the
+new positions) as its own, independent safeguard, so a bare
+`layoutChanged.emit()` there hasn't been a problem in practice — but this
+proper remap is the more direct fix, not a special case that only some
+reorders get.
+
+Only reachable for `is_interpolated` files (weak + moved) — a moved strong
+anchor's re-anchoring is the separate `is_re_anchored` flag and isn't
+affected by this. `MediaTableView.mousePressEvent` calls it (instead of
+blanking) when the "x" is clicked on such a file, then follows the file to
+its new row (`scrollTo` + `setCurrentIndex`) since undoing a move can send
+it a long way up the list.
+
+#### Undoing a date-picker correction
+A file whose date came from the picker can't be "undone" by just blanking
+its name the way a dragged file can — picking a date overwrites real data
+(`date`, `date_source`, and for a hard anchor `is_already_formatted` too),
+and blanking the box wouldn't put any of that back. `MediaTableModel.
+undo_manual_date(row)` does instead: it restores those three fields from
+`MediaFile.manual_date_undo` and repositions the file with the same
+`_reinsert_at_original_index` helper `undo_move` uses.
+
+`manual_date_undo` is a `(date, date_source, is_already_formatted)`
+snapshot taken by `set_manual_date`, but **only the first time** it's
+called on a file since the last Apply or load (`if f.manual_date_undo is
+None:` before overwriting it) — a second pick before the next Apply must
+not overwrite the snapshot with the *first* pick's result, or "x" would
+only ever undo one step instead of all the way back to how the file
+actually started. `_sort_by_filename()` clears it for every file (whether
+or not that particular file was touched), the same "since the last Apply"
+checkpoint `original_index` resets on.
+
+Deliberately doesn't require `user_moved` the way `undo_move` does:
+`set_manual_date` leaves `user_moved = False`, specifically so a corrected
+date still counts as a real anchor for its neighbours' interpolation
+(`_find_anchor_before`/`_after` skip anything `user_moved`) rather than
+being treated as suspect the way a dragged file is — setting `user_moved =
+True` here to reuse the drag-undo path outright was considered and
+rejected for exactly that reason.
+
+The icon itself stays "x" for every state — it doesn't grow a second glyph
+or swap its shape depending on what it's about to do. What it says is
+covered by a tooltip instead: hovering it shows "Reset", via a
+`QEvent.ToolTip` handler in `MediaTableView.viewportEvent()` (the icon has
+no real widget of its own to hang a native tooltip off, so this is the
+targeted equivalent — only the icon's own rect within the cell claims the
+event; everywhere else in the box falls through to no tooltip).
 
 ### Per-file date/time editing
 The Date taken cell shows a small calendar icon at its right edge (drawn with
@@ -511,30 +644,84 @@ calendar shows exactly what "Set date and time" will apply. The row index in
 each list *is* its value, so `currentRow()` reads it back directly.
 
 It is pre-filled with `f.effective_date or f.date` — the value the cell
-displays — with the current hour/min/sec scrolled into view (`show_near()`
-calls `_center_selected()` after `show()`, since it needs the final size),
-and shows below the icon (above if there's no room, never off-screen).
-"Set date and time" emits `committed(datetime)`; Cancel, Escape or clicking
-away changes nothing. Selections (calendar day, list rows) use the app's solid
-blue: the app palette's `Highlight` is a very pale blue that made them
-nearly invisible.
+displays, or an unfinished draft for this same file if one exists (see
+"Resuming an interrupted selection" below) — with the current hour/min/sec
+scrolled into view (`show_near()` calls `_center_selected()` after `show()`,
+since it needs the final size), and shows below the icon (above if there's
+no room, never off-screen). "Set date and time" emits `committed(datetime)`
+and applies the change; Cancel, Escape or clicking away applies nothing but
+isn't a full discard either — see below. Selections (calendar day, list
+rows) use the app's solid blue: the app palette's `Highlight` is a very pale
+blue that made them nearly invisible.
+
+#### Resuming an interrupted selection
+`Qt.Popup` closes the picker on any click outside it, on Escape, and — less
+obviously — on the whole *application* losing active focus (a notification
+from another app, for instance), which used to silently discard whatever
+was mid-selection with no way back. `DateTimePickerPopup.closeEvent()` now
+catches every non-"Set date and time" close and, if the value actually
+changed from what the popup opened with, emits `draft_changed(datetime)`
+instead of just discarding it. The "actually changed" check matters: without
+it, merely opening a file's picker to glance at it and closing again would
+count as a draft too, and could silently evict a different file's real one
+(see below) for nothing.
+
+`MediaTableView._date_draft` holds at most one `(filepath, datetime)` pair —
+deliberately just one slot, not a dict of every file ever opened. A draft
+only matters while that one file is still mid-edit; opening the picker on a
+*different* file has nothing to do with it and starts fresh from that
+file's own current date, same as if no draft existed. Committing (or
+opening a fresh, no-op popup and closing it again) clears the slot, so nothing
+lingers once it's no longer relevant. This means only the single
+most-recently-touched file's draft ever survives — starting a second
+unfinished edit on another file before returning to the first will lose the
+first's draft, which is an accepted trade for not having to track history
+for files nobody's mid-edit on.
 
 `MediaTableView._open_date_picker` opens it, and holds a
 `QPersistentModelIndex` so the commit still lands on the right row if rows
 move while the popup is open. Committing calls
 `model.setData(index, dt, Qt.EditRole)` → `MediaTableModel.set_manual_date(row, dt)`,
 which:
-1. Sets `f.date = dt`, `f.date_source = 'manual'`.
-2. Clears `f.user_moved = False` — the chosen date is now the file's
+1. Snapshots `(f.date, f.date_source, f.is_already_formatted)` into
+   `f.manual_date_undo` — but only if it's still `None`, i.e. only on the
+   first pick since the last Apply or load. See "Undoing a date-picker
+   correction" above.
+2. Sets `f.date = dt`, `f.date_source = 'manual'`.
+3. Clears `f.user_moved = False` — the chosen date is now the file's
    authoritative position, so Pass 1 takes the simple "untouched strong
    anchor" branch rather than re-anchoring/averaging against neighbours.
-3. Clears `f.manual_filename = None` — a filename typed before the date
+4. Clears `f.manual_filename = None` — a filename typed before the date
    correction was based on the old, wrong date and would otherwise sit
    there unchanged and stale.
-4. Runs a full `recalculate_proposed_filenames()` — unlike the filename
-   reset above, this can legitimately change other rows too (this file may
-   now anchor its neighbours' interpolation), so it isn't a targeted,
-   single-cell update.
+5. Clears `f.is_already_formatted = False` — see "Wrong-metadata hard
+   anchors" above.
+6. Calls `_reposition_by_date(row, dt)`: moves the file to sit between the
+   two files whose *current* displayed date (`effective_date or date`)
+   brackets `dt` — the same outcome as dragging it there by hand, just
+   driven by the date instead. Only hard anchors and strong-sourced files
+   (`_is_strong`) count as reference points — a weak file's displayed date
+   is either nonexistent (`needs_attention`) or itself interpolated from
+   its neighbours, so it's skipped either way when looking for where `dt`
+   belongs, same as `_find_anchor_before`/`_find_anchor_after` already
+   treat weak files as unusable anchors. Finds the qualifying anchor with
+   the *smallest* date that's still later than `dt`, not just the first
+   one encountered scanning the list — unlike `_reinsert_at_original_index`
+   (used by `undo_move`/`undo_manual_date`), there's no guarantee the list
+   is already in date order (a fresh alphabetical load routinely isn't),
+   so stopping at the first later-dated anchor found can land on one much
+   further away than the true nearest one, which might sit later in the
+   list.
+7. Runs a full `recalculate_proposed_filenames()` — this can legitimately
+   change other rows too (this file may now anchor its neighbours'
+   interpolation, or no longer anchor ones it used to), so it isn't a
+   targeted, single-cell update.
+
+Since the file can end up anywhere in the list, `_open_date_picker`'s
+`commit()` callback follows it after `setData()` returns — finds its new
+row by identity and calls `scrollTo(..., QAbstractItemView.PositionAtCenter)`
+plus `setCurrentIndex()`, the same pattern `undo_move`'s caller in
+`mousePressEvent` uses for the same reason.
 
 `_is_strong()` needed no change to treat `'manual'` as strong: it already
 returns strong for any `date_source` that isn't `'date modified'` or
@@ -560,6 +747,11 @@ silently undoing the correction. (This branch's `f.filename` could never look
 already-formatted before this feature existed, so `force=True` is a no-op
 for every other case that reaches it — only a just-demoted hard anchor hits
 the guard.)
+
+It's also relocated to its correct chronological position (`_reposition_by_date`,
+below) — the same `set_manual_date` call handles both, since a hard anchor
+wrong enough to need correcting is exactly the file most likely to be
+sitting somewhere badly wrong in the list.
 
 ### Hold to repeat — Move up/down buttons
 When the Move up/down toolbar buttons are held down, the move action repeats

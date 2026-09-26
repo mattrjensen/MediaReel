@@ -9,8 +9,7 @@ import pytest
 from media_model import (
     MediaFile,
     MediaTableModel,
-    _PLACEHOLDER_PHASE1,
-    _PLACEHOLDER_PHASE2,
+    _PLACEHOLDER_NEEDS_ATTENTION,
 )
 from metadata_reader import (
     DATE_SOURCE_METADATA,
@@ -110,17 +109,19 @@ class TestStrongAnchor:
         assert '090000' not in b.proposed_filename or b.proposed_filename < a.proposed_filename
 
 
-# ── Weak anchors — Phase 1 (strong renames pending) ──────────────────────────
+# ── Weak anchors — a strong anchor is still pending its own rename ───────────
+# (has_pending_strong_renames() == True; no longer gates anything in the UI,
+# but still exercised here as an unrelated-state sanity check.)
 
-class TestWeakAnchorPhase1:
-    def test_unmoved_gets_phase1_placeholder(self, model):
+class TestWeakAnchorStrongAnchorPending:
+    def test_unmoved_gets_placeholder(self, model):
         s = strong('IMG_001.jpg', datetime(2024, 12, 15, 10, 0, 0))
         w = weak('received_001.jpg')
         load(model, [s, w])
         assert w.needs_attention
-        assert w.proposed_filename == _PLACEHOLDER_PHASE1
+        assert w.proposed_filename == _PLACEHOLDER_NEEDS_ATTENTION
 
-    def test_moved_gets_interpolated_even_in_phase1(self, model):
+    def test_moved_gets_interpolated_regardless(self, model):
         a = hard('20241215_100000_a.jpg', datetime(2024, 12, 15, 10, 0, 0))
         s = strong('IMG_002.jpg', datetime(2024, 12, 15, 11, 0, 0))
         w = weak('received_001.jpg', user_moved=True)
@@ -130,15 +131,15 @@ class TestWeakAnchorPhase1:
         assert '---' not in w.proposed_filename
 
 
-# ── Weak anchors — Phase 2 (no strong renames pending) ───────────────────────
+# ── Weak anchors — no strong anchor pending ───────────────────────────────────
 
-class TestWeakAnchorPhase2:
-    def test_unmoved_gets_phase2_placeholder(self, model):
+class TestWeakAnchorNoStrongAnchorPending:
+    def test_unmoved_gets_placeholder(self, model):
         a = hard('20241215_100000_a.jpg', datetime(2024, 12, 15, 10, 0, 0))
         w = weak('received_001.jpg')
         load(model, [a, w])
         assert w.needs_attention
-        assert w.proposed_filename == _PLACEHOLDER_PHASE2
+        assert w.proposed_filename == _PLACEHOLDER_NEEDS_ATTENTION
 
     def test_moved_between_anchors_gets_midpoint(self, model):
         a = hard('20241215_100000_a.jpg', datetime(2024, 12, 15, 10, 0, 0))
