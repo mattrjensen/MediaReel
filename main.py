@@ -941,7 +941,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Media Reel')
-        self.setMinimumSize(1100, 600)
+        # Wide enough for the whole toolbar: a QToolBar that runs out of room
+        # doesn't stop the window shrinking, it pushes its *last* items —
+        # Apply rename — into a » overflow menu. The toolbar needs ~1180px
+        # with the "need ordering" controls showing and typical counts;
+        # 1200 keeps roughly the same slack the old 1100 had before the
+        # Move buttons and selection text joined the row.
+        self.setMinimumSize(1200, 600)
         self.resize(1280, 800)
         self._model        = MediaTableModel()
         self._expanded     = False
@@ -985,21 +991,9 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._btn_expand)
         toolbar.addSeparator()
 
-        self._btn_down = QPushButton('▼  Move down')
-        self._btn_down.setStyleSheet(self._btn_style())
-        self._btn_down.setEnabled(False)
-        toolbar.addWidget(self._btn_down)
-
-        self._btn_up = QPushButton('▲  Move up')
-        self._btn_up.setStyleSheet(self._btn_style())
-        self._btn_up.setEnabled(False)
-        toolbar.addWidget(self._btn_up)
-
-        toolbar.addSeparator()
-
         # Files needing ordering: a status label with Prev / Next to step
         # through them. One container widget, so a single toolbar action
-        # shows/hides all three together (see _refresh_attention_controls).
+        # shows/hides all three together (see _set_attention_visible).
         attention = QWidget()
         attention_layout = QHBoxLayout(attention)
         attention_layout.setContentsMargins(0, 0, 0, 0)
@@ -1018,7 +1012,27 @@ class MainWindow(QMainWindow):
         attention_layout.addWidget(self._btn_next)
 
         self._act_attention = toolbar.addWidget(attention)
-        self._act_attention.setVisible(False)
+        # The separator after the group is hidden with it, or the two
+        # separators either side of a hidden group would sit back to back.
+        self._sep_attention = toolbar.addSeparator()
+        self._set_attention_visible(False)
+
+        # Move buttons, led by how many rows they'll act on — they move the
+        # whole selection, so the count says what a click is about to do.
+        self._lbl_selected_toolbar = QLabel('')
+        self._lbl_selected_toolbar.setStyleSheet(
+            'color: #6B7280; font-size: 12px; padding: 0 8px;')
+        toolbar.addWidget(self._lbl_selected_toolbar)
+
+        self._btn_up = QPushButton('▲  Move up')
+        self._btn_up.setStyleSheet(self._btn_style())
+        self._btn_up.setEnabled(False)
+        toolbar.addWidget(self._btn_up)
+
+        self._btn_down = QPushButton('▼  Move down')
+        self._btn_down.setStyleSheet(self._btn_style())
+        self._btn_down.setEnabled(False)
+        toolbar.addWidget(self._btn_down)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1377,12 +1391,12 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self._lbl_files.setText(f'Loading {count} files…')
         for lbl in (self._lbl_selected, self._lbl_to_rename, self._lbl_flagged,
-                    self._lbl_toolbar_rename):
+                    self._lbl_toolbar_rename, self._lbl_selected_toolbar):
             lbl.setText('')   # counts from the previous folder
         self._btn_apply.setEnabled(False)
         self._btn_up.setEnabled(False)
         self._btn_down.setEnabled(False)
-        self._act_attention.setVisible(False)  # clear stale state from previous folder
+        self._set_attention_visible(False)  # clear stale state from previous folder
         self._overlay.start()
         self._thumb_pulse_timer.start()
 
@@ -1437,9 +1451,13 @@ class MainWindow(QMainWindow):
             # currentChanged (see _connect_signals).
             self._btn_prev.setEnabled(self._attention_target(-1, flagged) is not None)
             self._btn_next.setEnabled(self._attention_target(1, flagged) is not None)
-            self._act_attention.setVisible(True)
+            self._set_attention_visible(True)
         else:
-            self._act_attention.setVisible(False)
+            self._set_attention_visible(False)
+
+    def _set_attention_visible(self, visible: bool):
+        self._act_attention.setVisible(visible)
+        self._sep_attention.setVisible(visible)
 
     def _on_rename_complete(self, success: int, errors: int):
         # Taken first: the resort below reorders rows, and the view would
@@ -1506,6 +1524,10 @@ class MainWindow(QMainWindow):
         # deliberately matches the toolbar button's wording — same count
         # (needs_attention), same phrase.
         self._lbl_selected.setText(f'  ·  {selected} file(s) selected')
+        # Shorter than the status bar's "file(s) selected": the toolbar is
+        # nearly full (see setMinimumSize in __init__), and next to the Move
+        # buttons "N selected" says the same thing.
+        self._lbl_selected_toolbar.setText(f'{selected} selected')
         self._lbl_to_rename.setText(f'  ·  {will_rename} file(s) to be renamed')
         self._lbl_flagged.setText(f'  ·  {flagged} file(s) need ordering')
         self._lbl_toolbar_rename.setText(
