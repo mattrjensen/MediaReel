@@ -30,7 +30,7 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **Hold-to-repeat** — hold Move up/down buttons for accelerating repeat, with a speed cap to prevent overshooting
 - **Expand/compact view** — toggle between compact overview and expanded thumbnails for content-based ordering
 - **Thumbnail click to open** — in expanded mode, click a thumbnail to open the file in its default app (Photos, video player)
-- **Non-destructive** — nothing is written to disk until you click Apply rename
+- **Non-destructive** — nothing is written to disk until you click Rename files
 - **Video support** — first-frame thumbnails via ffmpeg, duration badges, correct iOS video timezone handling
 
 ### Supported file types
@@ -59,9 +59,9 @@ Files already named in this format are recognised and left unchanged.
 ### Recommended workflow
 
 1. Open a folder containing all media from the event
-2. Apply rename to dated files first — this commits their timestamps as hard anchors
+2. Rename the dated files first — this commits their timestamps as hard anchors
 3. Nudge undated files (WhatsApp downloads, Facebook saves, etc.) into position between the anchors
-4. Apply rename again — undated files get interpolated timestamps based on their position
+4. Click Rename files again — undated files get interpolated timestamps based on their position
 
 ---
 
@@ -139,7 +139,7 @@ MVP — actively used and tested on real event photo collections.
 - Metadata reading (photos and iOS/Android video)
 - Five-state file classification
 - Live filename preview
-- Apply rename with resort
+- Rename files with resort
 - Fast metadata loading — a 2000-file folder's dates are read in a few seconds and the UI is usable straight away
 - Thumbnail generation (photos, HEIC and video via ffmpeg), loading in the background with a pulsing "Loading…" placeholder
 - Edit a file's proposed new filename directly in its row, and set a file's date and time from a

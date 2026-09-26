@@ -943,7 +943,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Media Reel')
         # Wide enough for the whole toolbar: a QToolBar that runs out of room
         # doesn't stop the window shrinking, it pushes its *last* items —
-        # Apply rename — into a » overflow menu. The toolbar needs ~1180px
+        # Rename files — into a » overflow menu. The toolbar needs ~1180px
         # with the "need ordering" controls showing and typical counts;
         # 1200 keeps roughly the same slack the old 1100 had before the
         # Move buttons and selection text joined the row.
@@ -1049,7 +1049,7 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self._btn_apply = QPushButton('✓  Apply rename')
+        self._btn_apply = QPushButton('✓  Rename files')
         self._btn_apply.setStyleSheet(self._btn_style_primary())
         self._btn_apply.setEnabled(False)
         toolbar.addWidget(self._btn_apply)
@@ -1302,7 +1302,7 @@ class MainWindow(QMainWindow):
                f'Make sure you have a backup.\n\nContinue?')
 
         reply = QMessageBox.question(
-            self, 'Apply rename', msg,
+            self, 'Rename files', msg,
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
