@@ -997,9 +997,27 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self._btn_attention = QPushButton('⚠  0 files need attention')
-        self._btn_attention.setStyleSheet(self._btn_style_warn())
-        self._act_attention = toolbar.addWidget(self._btn_attention)
+        # Files needing ordering: a status label with Prev / Next to step
+        # through them. One container widget, so a single toolbar action
+        # shows/hides all three together (see _refresh_attention_controls).
+        attention = QWidget()
+        attention_layout = QHBoxLayout(attention)
+        attention_layout.setContentsMargins(0, 0, 0, 0)
+        attention_layout.setSpacing(6)   # same as the toolbar's own spacing
+
+        self._lbl_attention = QLabel('⚠  0 file(s) need ordering')
+        self._lbl_attention.setStyleSheet(self._label_style_warn())
+        attention_layout.addWidget(self._lbl_attention)
+
+        self._btn_prev = QPushButton('Prev')
+        self._btn_prev.setStyleSheet(self._btn_style())
+        attention_layout.addWidget(self._btn_prev)
+
+        self._btn_next = QPushButton('Next')
+        self._btn_next.setStyleSheet(self._btn_style())
+        attention_layout.addWidget(self._btn_next)
+
+        self._act_attention = toolbar.addWidget(attention)
         self._act_attention.setVisible(False)
 
         spacer = QWidget()
@@ -1139,7 +1157,8 @@ class MainWindow(QMainWindow):
         self._btn_up.released.connect(self._on_move_released)
         self._btn_expand.clicked.connect(self._toggle_expand)
         self._btn_apply.clicked.connect(self._apply_rename)
-        self._btn_attention.clicked.connect(self._jump_to_attention)
+        self._btn_prev.clicked.connect(lambda: self._step_attention(-1))
+        self._btn_next.clicked.connect(lambda: self._step_attention(1))
         self._move_delegate.row_move_requested.connect(
             lambda row, direction: self._move(direction, row))
         self._thumb_delegate.open_file_requested.connect(self._open_file)
@@ -1162,6 +1181,10 @@ class MainWindow(QMainWindow):
 
         self._table.selectionModel().selectionChanged.connect(
             self._on_selection_changed)
+        # The current row can move without the selection changing (Ctrl+arrow
+        # keys), and Prev/Next's enabled state depends on it.
+        self._table.selectionModel().currentChanged.connect(
+            lambda *_: self._refresh_attention_controls())
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -1281,15 +1304,32 @@ class MainWindow(QMainWindow):
         self._model.rename_progress.disconnect()
         dlg.close()
 
-    def _jump_to_attention(self):
-        files = self._model.files()
-        target = next(
-            (i for i, f in enumerate(files) if f.needs_attention),
-            None)
-        if target is not None:
-            idx = self._model.index(target, COL_FILENAME)
-            self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
-            self._table.setCurrentIndex(idx)
+    def _attention_target(self, direction: int, flagged: list):
+        """Row of the next (+1) or previous (-1) file that needs ordering,
+        relative to the table's current row, or None if there isn't one —
+        it doesn't wrap, so past the last flagged file Next has nowhere to
+        go (and likewise Prev before the first).
+
+        Works from the current row rather than a remembered position in the
+        list of flagged files: flagged files move and stop being flagged as
+        the user works on them, which would leave a stored position pointing
+        at the wrong file. With no current row, Next targets the first
+        flagged file and Prev the last. `flagged` is the ascending list of
+        flagged row numbers."""
+        cur = self._table.currentIndex()
+        row = cur.row() if cur.isValid() else None
+        if direction > 0:
+            return next((i for i in flagged if row is None or i > row), None)
+        return next((i for i in reversed(flagged) if row is None or i < row), None)
+
+    def _step_attention(self, direction: int):
+        flagged = [i for i, f in enumerate(self._model.files()) if f.needs_attention]
+        target = self._attention_target(direction, flagged)
+        if target is None:
+            return
+        idx = self._model.index(target, COL_FILENAME)
+        self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        self._table.setCurrentIndex(idx)
 
     def _open_file(self, filepath: str):
         try:
@@ -1384,13 +1424,19 @@ class MainWindow(QMainWindow):
             'Check that vendor/exiftool.exe is present and not blocked.')
 
     def _on_attention_required(self, count: int):
-        self._refresh_attention_button()
+        self._refresh_attention_controls()
 
-    def _refresh_attention_button(self):
-        files = self._model.files()
-        n = sum(1 for f in files if f.needs_attention)
+    def _refresh_attention_controls(self):
+        flagged = [i for i, f in enumerate(self._model.files()) if f.needs_attention]
+        n = len(flagged)
         if n > 0:
-            self._btn_attention.setText(f'⚠  {n} file(s) need ordering')
+            self._lbl_attention.setText(f'⚠  {n} file(s) need ordering')
+            # Greyed out where there's nowhere further to go, rather than
+            # silently doing nothing when clicked. Depends on the current
+            # row as well as the flagged set, so this also runs on
+            # currentChanged (see _connect_signals).
+            self._btn_prev.setEnabled(self._attention_target(-1, flagged) is not None)
+            self._btn_next.setEnabled(self._attention_target(1, flagged) is not None)
             self._act_attention.setVisible(True)
         else:
             self._act_attention.setVisible(False)
@@ -1464,7 +1510,7 @@ class MainWindow(QMainWindow):
         self._lbl_flagged.setText(f'  ·  {flagged} file(s) need ordering')
         self._lbl_toolbar_rename.setText(
             f'{will_rename} file(s) to be renamed.' if will_rename else '')
-        self._refresh_attention_button()
+        self._refresh_attention_controls()
 
     def _refresh_move_buttons(self):
         has_sel = bool(self._model.get_selected_indices())
@@ -1505,15 +1551,11 @@ class MainWindow(QMainWindow):
             }
         '''
 
-    def _btn_style_warn(self) -> str:
-        return '''
-            QPushButton {
-                border: 1px solid #D97706; border-radius: 5px;
-                padding: 5px 14px; background: #FEF3C7;
-                font-size: 12px; color: #92400E; font-weight: 500;
-            }
-            QPushButton:hover { background: #FDE68A; }
-        '''
+    def _label_style_warn(self) -> str:
+        # Amber like the row highlight it refers to, but deliberately no
+        # border/background — it's a status readout, not something to click,
+        # so it shouldn't be dressed like the buttons beside it.
+        return 'color: #92400E; font-size: 12px; font-weight: 500; padding: 0 6px;'
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
