@@ -111,6 +111,15 @@ METADATA_CHUNK_SIZE = 100
 EXIFTOOL_ENCODING = 'utf-8'
 
 
+def file_size_bytes(filepath: str) -> Optional[int]:
+    """Size on disk in bytes, or None if it can't be read (file gone,
+    permissions) — a missing size just shows as blank, not an error."""
+    try:
+        return os.path.getsize(filepath)
+    except OSError:
+        return None
+
+
 def _new_result(filepath: str) -> dict:
     path = Path(filepath)
     filename = path.name
@@ -123,6 +132,10 @@ def _new_result(filepath: str) -> dict:
         'date': None,
         'date_source': DATE_SOURCE_NONE,
         'stripped_filename': strip_date_from_filename(filename),
+        # Read here, on the worker thread, rather than when the stub rows are
+        # created: a stat per file on the main thread would delay the table
+        # appearing on a big or slow (network) folder.
+        'size_bytes': file_size_bytes(filepath),
     }
 
 

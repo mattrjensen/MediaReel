@@ -7,7 +7,7 @@ The app works by renaming files with a prepended `YYYYMMDD_HHMMSS_` timestamp, m
 
 The primary use case is post-event curation: once files are in order, you can compare competing captures of the same moment side by side and choose the best photo or video of each. The chronological sequence turns an ambiguous pile of files into a navigable story, ready to be culled into the best photographic memory of the event.
 
-The app is intentionally single-session and non-destructive — no files are touched on disk until the user explicitly applies changes.
+The app is intentionally single-session and non-destructive — no files are touched on disk until the user explicitly applies changes. The one exception is the per-row Delete button, which acts immediately (after a confirmation) but only ever moves the file to the Recycle Bin; see "File size and deleting a file".
 
 ## Tech stack
 - Python 3.14
@@ -47,7 +47,7 @@ MediaReel/
 `.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.mp4`, `.mov`, `.avi`
 
 ## Core design principle
-The filename is the source of truth. The app is non-destructive until the user clicks Rename files. Everything before that is a preview. No files are touched on disk until Apply. Files should be self-describing and self-ordering forever, independent of any app, platform, or cataloguing software.
+The filename is the source of truth. The app is non-destructive until the user clicks Rename files. Everything before that is a preview. No files are touched on disk until Apply — except Delete, which is deliberately immediate rather than staged (after a confirmation, and into the Recycle Bin, so it stays recoverable). Files should be self-describing and self-ordering forever, independent of any app, platform, or cataloguing software.
 
 ---
 
@@ -177,6 +177,9 @@ effective_date: datetime | None # the date this file will carry after rename;
                                 # return stale source dates after recalculate
 thumbnail: QPixmap | None      # loaded async after initial metadata
 duration_seconds: int | None   # video only
+size_bytes: int | None         # file size; None until the metadata worker has read it
+                               # (shown blank meanwhile). Re-read after a rename that
+                               # rewrites the file's metadata.
 selected: bool                 # checkbox state
 manual_filename: str | None    # user override from the editable New filename
                                # field. None = use proposed_filename; '' = skip
@@ -322,8 +325,6 @@ renamed files elsewhere, so the same offset may now show different files.)
 One message, always:
 {n} file(s) will be renamed.
 
-Make sure you have a backup.
-
 Continue?
 
 `{n}` counts files where `display_filename` differs from `filename` (not
@@ -413,9 +414,11 @@ into account at all; the only per-row distinction left is `needs_attention`.
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
 | 3 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
-| 4 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
-| 5 | Preview | Thumbnail. Videos show first frame + duration badge. |
-| 6 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
+| 4 | Size | Size in MB to one decimal place (`format_file_size`), right-aligned in a narrow column. A small non-empty file reads `<0.1 MB` rather than a misleading `0.0 MB`; blank until read. See "File size and deleting a file". |
+| 5 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
+| 6 | Preview | Thumbnail. Videos show first frame + duration badge. |
+| 7 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
+| 8 | Delete | Trash-can button that deletes that row's file (after a confirmation). See "File size and deleting a file". |
 
 ---
 
@@ -786,6 +789,52 @@ It's also relocated to its correct chronological position (`_reposition_by_date`
 below) — the same `set_manual_date` call handles both, since a hard anchor
 wrong enough to need correcting is exactly the file most likely to be
 sitting somewhere badly wrong in the list.
+
+### File size and deleting a file
+
+**Size column** (`COL_SIZE`, right after Date taken). `MediaFile.size_bytes`
+is read with `os.path.getsize` in `metadata_reader._new_result`, i.e. on the
+metadata worker threads, not when the stub rows are created — a stat per file
+on the main thread would delay the table appearing on a big or network folder.
+So it fills in with the dates and is blank until then. It's shown in MB to one
+decimal place using 1 MB = 1024 × 1024 bytes (what Explorer shows); anything
+non-empty that would round to `0.0` reads `<0.1 MB` instead. Values and header
+are right-aligned (`_SizeDelegate`, and `headerData`'s `TextAlignmentRole`).
+`apply_rename()` re-reads the size after a rename that rewrites the file's
+metadata (interpolated / manually dated files), since that changes it slightly.
+
+**Delete column** (`COL_DELETE`, last — after Move). A trash-can button drawn
+with painter primitives (`DeleteDelegate`, like the calendar icon). Clicking it:
+
+1. `MediaTableView.mousePressEvent` hit-tests the button rect and emits
+   `file_delete_requested(MediaFile)` from the next event-loop turn
+   (`QTimer.singleShot(0, …)`) so the modal confirmation doesn't run from inside
+   the press handler. It's handled in the view, not `editorEvent`, so pressing
+   the button doesn't run the normal selection handling — the existing selection
+   is left alone (the answer may well be No). The file is passed, not a row
+   number, because rows can move before the signal is handled.
+2. `MainWindow._delete_file` asks `Delete "<name>"? It will be moved to the
+   Recycle Bin.` (Yes/No, **No** default). It deletes **only the clicked row's
+   file**, never the whole selection — a stray click shouldn't be able to delete
+   several photos.
+3. `MediaTableModel.delete_file(row)` moves the file to the **Recycle Bin**
+   (`QFile.moveToTrash`) rather than deleting it permanently — it's the one
+   action here that can't be previewed first, and these are photos the user may
+   want back. Only after that succeeds does it `beginRemoveRows`/`endRemoveRows`
+   (so Qt adjusts selection and current row itself) and re-run
+   `recalculate_proposed_filenames()`, since the deleted file may have been an
+   anchor for its neighbours. A file already missing from disk just loses its
+   row. If the trash fails (open in another program; a network drive has no
+   Recycle Bin) nothing changes and the user gets a "could not delete" message.
+4. It refuses while metadata is still loading (`_pending_metadata_shards > 0`):
+   the shards write results back by fixed row index, so removing a row under
+   them would land results on the wrong files. (The loading overlay blocks the
+   table until then anyway.)
+
+There's no in-app undo: restoring a deleted file is done from the Recycle Bin,
+and it won't reappear in the table until the folder is reloaded.
+`tests/test_file_size_delete.py` covers this without ever reaching the real
+Recycle Bin (missing files, or `QFile.moveToTrash` patched).
 
 ### Hold to repeat — Move up/down buttons
 When the Move up/down toolbar buttons are held down, the move action repeats

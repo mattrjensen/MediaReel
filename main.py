@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    Qt, QSize, QRect, QEvent, QTimer, QRectF, QStandardPaths, Signal,
+    Qt, QSize, QRect, QEvent, QTimer, QRectF, QPointF, QStandardPaths, Signal,
     QDate, QPersistentModelIndex
 )
 from PySide6.QtGui import (
@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
 
 from media_model import (
     MediaTableModel, MediaFile, HEIF_AVAILABLE,
-    COL_CHECK, COL_ORDER, COL_FILENAME, COL_DATE,
-    COL_PREVIEW, COL_THUMB, COL_MOVE,
+    COL_CHECK, COL_ORDER, COL_FILENAME, COL_DATE, COL_SIZE,
+    COL_PREVIEW, COL_THUMB, COL_MOVE, COL_DELETE,
     MediaFileRole, DateSourceRole,
     IsInterpolatedRole, IsReAnchoredRole, NeedsAttentionRole
 )
@@ -479,14 +479,68 @@ class _CheckDelegate(BaseDelegate):
 
 class _RowTextDelegate(BaseDelegate):
 
+    _align  = Qt.AlignLeft
+    _colour = '#111827'
+
     def paint(self, painter: QPainter, option, index):
         f: MediaFile = index.data(MediaFileRole)
         painter.save()
         self._draw_bg(painter, option, f)
         text = index.data(Qt.DisplayRole) or ''
-        painter.setPen(QColor('#111827'))
+        painter.setPen(QColor(self._colour))
         painter.drawText(option.rect.adjusted(8, 0, -8, 0),
-                         Qt.AlignVCenter | Qt.AlignLeft, text)
+                         Qt.AlignVCenter | self._align, text)
+        painter.restore()
+
+
+class _SizeDelegate(_RowTextDelegate):
+    """Size column: right-aligned (they're numbers) and a little
+    quieter than the filename, since it's reference info, not something to
+    act on."""
+    _align  = Qt.AlignRight
+    _colour = '#6B7280'
+
+
+# ── Delete column ─────────────────────────────────────────────────────────────
+# A trash-can button, drawn with primitives like the calendar icon (a flat
+# single colour, no emoji). Clicks aren't handled here: MediaTableView routes
+# them itself (see mousePressEvent) so that pressing the button doesn't also
+# collapse the row selection the way an ordinary cell click would, and so the
+# hit-test and the painting share _button_rect.
+class DeleteDelegate(BaseDelegate):
+
+    BTN_W = 28
+    BTN_H = 24
+
+    def _button_rect(self, option) -> QRect:
+        r = option.rect
+        return QRect(r.x() + (r.width() - self.BTN_W) // 2,
+                     r.y() + (r.height() - self.BTN_H) // 2,
+                     self.BTN_W, self.BTN_H)
+
+    def paint(self, painter: QPainter, option, index):
+        f: MediaFile = index.data(MediaFileRole)
+        painter.save()
+        self._draw_bg(painter, option, f)
+
+        btn = self._button_rect(option)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor('#F3F4F6'))
+        painter.setPen(QColor('#D1D5DB'))
+        painter.drawRoundedRect(btn, 3, 3)
+
+        # Trash can, ~12 x 14, centred in the button.
+        x, y = btn.center().x() - 6, btn.center().y() - 7
+        painter.setPen(QPen(QColor('#6B7280'), 1.3))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(QPointF(x - 0.5, y + 2.5), QPointF(x + 12.5, y + 2.5))      # lid
+        painter.drawLine(QPointF(x + 4, y + 0.5), QPointF(x + 8, y + 0.5))           # handle
+        painter.drawLine(QPointF(x + 4, y + 0.5), QPointF(x + 4, y + 2.5))
+        painter.drawLine(QPointF(x + 8, y + 0.5), QPointF(x + 8, y + 2.5))
+        painter.drawPolyline([QPointF(x + 1.5, y + 4.5), QPointF(x + 2.5, y + 14),   # body
+                              QPointF(x + 9.5, y + 14), QPointF(x + 10.5, y + 4.5)])
+        painter.drawLine(QPointF(x + 4.5, y + 6.5), QPointF(x + 4.5, y + 11.5))      # ribs
+        painter.drawLine(QPointF(x + 7.5, y + 6.5), QPointF(x + 7.5, y + 11.5))
         painter.restore()
 
 
@@ -775,6 +829,11 @@ class MediaTableView(QTableView):
     # nobody's mid-edit on any more. See _open_date_picker.
     _date_draft = None
 
+    # The trash button was clicked on this file's row. Carries the MediaFile
+    # rather than a row number: it's emitted a beat later (see mousePressEvent)
+    # and rows can move in between.
+    file_delete_requested = Signal(object)
+
     def _open_date_picker(self, index, icon_rect: QRect):
         f: MediaFile = index.data(MediaFileRole)
         initial = (f.effective_date or f.date) if f else None
@@ -884,6 +943,18 @@ class MediaTableView(QTableView):
                         return
                     # Any other click in the date cell is just a normal
                     # selection click.
+
+                if col == COL_DELETE and f is not None:
+                    delegate = self.itemDelegateForColumn(COL_DELETE)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    if delegate._button_rect(opt).contains(pos):
+                        # Not a selection click: leave the selection alone
+                        # (the confirm may well be answered "No"). Emitted
+                        # from the next event-loop turn so the modal
+                        # confirmation isn't run from inside this handler.
+                        QTimer.singleShot(0, lambda f=f: self.file_delete_requested.emit(f))
+                        return
 
         super().mousePressEvent(event)
 
@@ -1111,16 +1182,20 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(COL_ORDER,    QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_FILENAME, QHeaderView.Interactive)
         hh.setSectionResizeMode(COL_DATE,     QHeaderView.Fixed)
+        hh.setSectionResizeMode(COL_SIZE,     QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_PREVIEW,  QHeaderView.Stretch)
         hh.setSectionResizeMode(COL_THUMB,    QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_MOVE,     QHeaderView.Fixed)
+        hh.setSectionResizeMode(COL_DELETE,   QHeaderView.Fixed)
 
         self._table.setColumnWidth(COL_CHECK,    32)
         self._table.setColumnWidth(COL_ORDER,    44)
         self._table.setColumnWidth(COL_FILENAME, 240)
         self._table.setColumnWidth(COL_DATE,     170)
+        self._table.setColumnWidth(COL_SIZE,     84)    # "1234.5 MB" plus padding
         self._table.setColumnWidth(COL_THUMB,    THUMB_W + 16)
         self._table.setColumnWidth(COL_MOVE,     48)
+        self._table.setColumnWidth(COL_DELETE,   56)
 
         self._table.verticalHeader().setDefaultSectionSize(ROW_H)
 
@@ -1131,13 +1206,17 @@ class MainWindow(QMainWindow):
         self._check_delegate    = _CheckDelegate(self)
         self._order_delegate    = _RowTextDelegate(self)
         self._filename_delegate = _RowTextDelegate(self)
+        self._size_delegate     = _SizeDelegate(self)
+        self._delete_delegate   = DeleteDelegate(self)
         self._table.setItemDelegateForColumn(COL_CHECK,   self._check_delegate)
         self._table.setItemDelegateForColumn(COL_ORDER,   self._order_delegate)
         self._table.setItemDelegateForColumn(COL_FILENAME, self._filename_delegate)
         self._table.setItemDelegateForColumn(COL_DATE,    self._date_delegate)
+        self._table.setItemDelegateForColumn(COL_SIZE,    self._size_delegate)
         self._table.setItemDelegateForColumn(COL_PREVIEW, self._preview_delegate)
         self._table.setItemDelegateForColumn(COL_THUMB,   self._thumb_delegate)
         self._table.setItemDelegateForColumn(COL_MOVE,    self._move_delegate)
+        self._table.setItemDelegateForColumn(COL_DELETE,  self._delete_delegate)
 
         layout.addWidget(self._table)
 
@@ -1180,6 +1259,7 @@ class MainWindow(QMainWindow):
         self._move_delegate.row_move_requested.connect(
             lambda row, direction: self._move(direction, row))
         self._thumb_delegate.open_file_requested.connect(self._open_file)
+        self._table.file_delete_requested.connect(self._delete_file)
 
         self._model.folder_load_started.connect(self._on_load_started)
         self._model.folder_load_complete.connect(self._on_load_complete)
@@ -1298,8 +1378,7 @@ class MainWindow(QMainWindow):
             and not f.display_filename.startswith('---')
             and f.display_filename != ''
         )
-        msg = (f'{pending} file(s) will be renamed.\n\n'
-               f'Make sure you have a backup.\n\nContinue?')
+        msg = f'{pending} file(s) will be renamed.\n\nContinue?'
 
         reply = QMessageBox.question(
             self, 'Rename files', msg,
@@ -1348,6 +1427,30 @@ class MainWindow(QMainWindow):
         idx = self._model.index(target, COL_FILENAME)
         self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
         self._table.setCurrentIndex(idx)
+
+    def _delete_file(self, f: MediaFile):
+        """The trash button on a row: confirm, then move that one file to the
+        Recycle Bin and remove its row. Only ever the clicked row's file —
+        not the whole selection — since a stray click shouldn't be able to
+        delete several photos."""
+        row = next((i for i, mf in enumerate(self._model.files()) if mf is f), None)
+        if row is None:
+            return   # already gone (deleted from another route while the click was queued)
+        reply = QMessageBox.question(
+            self, 'Delete file',
+            f'Delete "{f.filename}"?\n\nIt will be moved to the Recycle Bin.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        if not self._model.delete_file(row):
+            QMessageBox.warning(
+                self, 'Could not delete file',
+                f'"{f.filename}" could not be moved to the Recycle Bin.\n\n'
+                f'Check that it isn\'t open in another application. Files on '
+                f'a network drive can\'t be moved to the Recycle Bin.')
+            return
+        self._refresh_status()
+        self._refresh_move_buttons()
 
     def _open_file(self, filepath: str):
         try:

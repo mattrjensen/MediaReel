@@ -29,8 +29,10 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **Interpolation** — undated files moved between dated anchors get evenly distributed timestamps
 - **Hold-to-repeat** — hold Move up/down buttons for accelerating repeat, with a speed cap to prevent overshooting
 - **Expand/compact view** — toggle between compact overview and expanded thumbnails for content-based ordering
+- **File size** — a narrow column shows each file's size in MB
+- **Delete a file** — a trash button on each row moves that file to the Recycle Bin after you confirm
 - **Thumbnail click to open** — in expanded mode, click a thumbnail to open the file in its default app (Photos, video player)
-- **Non-destructive** — nothing is written to disk until you click Rename files
+- **Non-destructive** — nothing is written to disk until you click Rename files. (The one exception is the trash button on each row, which — after asking you to confirm — moves that file to the Recycle Bin straight away.)
 - **Video support** — first-frame thumbnails via ffmpeg, duration badges, correct iOS video timezone handling
 
 ### Supported file types

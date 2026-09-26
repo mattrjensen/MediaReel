@@ -22,12 +22,12 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QThreadPool,
-    QRunnable, Qt, Signal, QObject, QCoreApplication
+    QRunnable, Qt, Signal, QObject, QCoreApplication, QFile
 )
 from PySide6.QtGui import QColor, QPixmap, QImage
 
 from metadata_reader import (
-    read_metadata_batch, build_new_filename,
+    read_metadata_batch, build_new_filename, file_size_bytes,
     SUPPORTED_EXTENSIONS,
     DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED,
     DATE_SOURCE_METADATA, DATE_SOURCE_MANUAL
@@ -52,13 +52,28 @@ COL_CHECK    = 0
 COL_ORDER    = 1
 COL_FILENAME = 2
 COL_DATE     = 3
-COL_PREVIEW  = 4
-COL_THUMB    = 5
-COL_MOVE     = 6
-COLUMN_COUNT = 7
+COL_SIZE     = 4
+COL_PREVIEW  = 5
+COL_THUMB    = 6
+COL_MOVE     = 7
+COL_DELETE   = 8
+COLUMN_COUNT = 9
 
-HEADERS = ['', '#', 'Filename', 'Date taken',
-           'New filename (preview)', 'Preview', 'Move']
+HEADERS = ['', '#', 'Filename', 'Date taken', 'Size',
+           'New filename (preview)', 'Preview', 'Move', 'Delete']
+
+
+def format_file_size(size_bytes: Optional[int]) -> str:
+    """Size in MB to one decimal place (1 MB = 1024 * 1024 bytes, which is
+    what Explorer shows). Blank while the size hasn't been read yet. A small
+    but non-empty file would round to a misleading "0.0 MB", so those read
+    "<0.1 MB" instead."""
+    if size_bytes is None:
+        return ''
+    mb = size_bytes / (1024 * 1024)
+    if 0 < mb < 0.05:
+        return '<0.1 MB'
+    return f'{mb:.1f} MB'
 
 # ── Custom data roles ───────────────────────────────────────────────────────
 MediaFileRole      = Qt.UserRole + 1
@@ -113,6 +128,11 @@ class MediaFile:
     # Async-loaded fields
     thumbnail: Optional[QPixmap] = field(default=None, repr=False)
     duration_seconds: Optional[int] = None
+
+    # File size in bytes; None until the metadata worker has read it (shown
+    # as blank meanwhile). Re-read after a rename that rewrites the file's
+    # metadata, since that changes the size slightly.
+    size_bytes: Optional[int] = None
 
     # False until the thumbnail worker has finished with this file, whether
     # or not it produced an image — lets the UI tell "still loading" (pulsing
@@ -484,6 +504,10 @@ class MediaTableModel(QAbstractTableModel):
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
             return HEADERS[section]
+        # Sizes are right-aligned (they're numbers), so their header is too.
+        if (orientation == Qt.Horizontal and role == Qt.TextAlignmentRole
+                and section == COL_SIZE):
+            return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
@@ -499,6 +523,8 @@ class MediaTableModel(QAbstractTableModel):
                 return str(row + 1)
             if col == COL_FILENAME:
                 return f.filename
+            if col == COL_SIZE:
+                return format_file_size(f.size_bytes)
             if col == COL_DATE:
                 dt = f.effective_date or f.date
                 if dt:
@@ -902,6 +928,36 @@ class MediaTableModel(QAbstractTableModel):
         self._reinsert_at_original_index(row)
         self.recalculate_proposed_filenames()
 
+    def delete_file(self, row: int) -> bool:
+        """Move the file at `row` to the Recycle Bin and drop its row.
+        Returns False, with nothing changed, if it couldn't be trashed (open
+        in another program, or a drive with no Recycle Bin such as a network
+        share) or if the folder is still loading.
+
+        Recycle Bin rather than permanent deletion: the user is deleting
+        photos they may well want back, and it's the one thing here that
+        can't be previewed first. The row goes only after the file has.
+        A file already missing from disk just loses its row.
+
+        Refuses while metadata is still loading: the shards write results
+        back by fixed row index (see _on_metadata_chunk_ready), so removing
+        a row underneath them would land results on the wrong files. (The
+        loading overlay blocks the table until then anyway.)
+
+        Uses beginRemoveRows/endRemoveRows so Qt adjusts the selection and
+        current row itself. The remaining files are re-evaluated afterwards,
+        since the deleted one may have been an anchor for its neighbours."""
+        if row < 0 or row >= len(self._files) or self._pending_metadata_shards > 0:
+            return False
+        f = self._files[row]
+        if os.path.exists(f.filepath) and not QFile.moveToTrash(f.filepath):
+            return False
+        self.beginRemoveRows(QModelIndex(), row, row)
+        del self._files[row]
+        self.endRemoveRows()
+        self.recalculate_proposed_filenames()
+        return True
+
     def get_selected_indices(self) -> List[int]:
         return [i for i, f in enumerate(self._files) if f.selected]
 
@@ -1125,6 +1181,9 @@ class MediaTableModel(QAbstractTableModel):
 
                     if write_metadata:
                         self._write_metadata_date(str(dest), f, exiftool_path)
+                        # Rewriting the metadata changes the file's size a
+                        # little; keep the Size column honest.
+                        f.size_bytes = file_size_bytes(str(dest))
 
                     f.is_already_formatted = True
                     f.is_interpolated      = False
@@ -1223,6 +1282,7 @@ class MediaTableModel(QAbstractTableModel):
                 date_source          = meta['date_source'],
                 stripped_filename    = meta['stripped_filename'],
                 duration_seconds     = meta.get('duration_seconds'),
+                size_bytes           = meta.get('size_bytes'),
                 # A thumbnail may already have arrived for this row — keep it.
                 thumbnail            = old.thumbnail,
                 thumbnail_loaded     = old.thumbnail_loaded,
