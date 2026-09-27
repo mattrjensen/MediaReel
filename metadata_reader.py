@@ -84,6 +84,11 @@ DATE_TAG_CANDIDATES = [
     'QuickTime:DateTimeOriginal',  # iOS .mp4 — local time with tz offset
                        # Note: exiftool CLI shows as UserData:DateTimeOriginal but
                        # pyexiftool returns as QuickTime:DateTimeOriginal
+    'QuickTime:ContentCreateDate', # .m4v/.mov from editors and exports (e.g. iMovie) — the
+                                   # original capture time, local time with tz offset e.g.
+                                   # 2017:06:24 09:55:46+10:00. QuickTime:CreateDate on these
+                                   # files is the export date, not the capture date.
+                                   # exiftool CLI shows it as ItemList:ContentCreateDate.
     'EXIF:DateTimeOriginal',
     'EXIF:CreateDate',
     'QuickTime:CreateDate',

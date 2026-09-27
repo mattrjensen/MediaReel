@@ -86,6 +86,17 @@ at the top of the candidates list, above `QuickTime:CreateDate`:
    Shown as `UserData:DateTimeOriginal` in the exiftool CLI but returned as
    `QuickTime:DateTimeOriginal` by pyexiftool.
 
+A third tag covers videos that have been through an editor or export:
+
+3. **`QuickTime:ContentCreateDate`** — e.g. a `.m4v` exported from iMovie
+   (`2017:06:24 09:55:46+10:00`). Shown as `ItemList:ContentCreateDate` in the
+   exiftool CLI, returned as `QuickTime:ContentCreateDate` by pyexiftool. On
+   these files `QuickTime:CreateDate` (and the media/track create dates) hold
+   the *export* date — one real file read `2018:06:08 12:57:46` there against a
+   `ContentCreateDate` of `2017:06:24` — so without this tag the app would
+   trust the export date and label it `metadata`. It sits after the two iOS
+   tags and before the EXIF ones, and is simply absent on photos.
+
 The `[:19]` truncation in the parser strips the timezone offset suffix cleanly,
 giving correct local time. `QuickTime:CreateDate` remains in the list as a
 fallback for non-iOS video files (Android stores local time there).
@@ -95,6 +106,7 @@ fallback for non-iOS video files (Android stores local time there).
 candidates = [
     'QuickTime:CreationDate',      # iOS .mov — local time with tz offset
     'QuickTime:DateTimeOriginal',  # iOS .mp4 — local time with tz offset
+    'QuickTime:ContentCreateDate', # edited/exported video — original capture time
     'EXIF:DateTimeOriginal',
     'EXIF:CreateDate',
     'QuickTime:CreateDate',

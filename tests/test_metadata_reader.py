@@ -135,3 +135,32 @@ class TestExtensions:
         from metadata_reader import SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS
         assert not PHOTO_EXTENSIONS & VIDEO_EXTENSIONS
         assert SUPPORTED_EXTENSIONS == PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
+
+
+class TestDateTagPriority:
+    """_date_from_tags walks DATE_TAG_CANDIDATES in order."""
+
+    def test_content_create_date_beats_export_create_date(self):
+        # An exported .m4v: CreateDate is the export date, ContentCreateDate
+        # the original capture (values from a real file).
+        from metadata_reader import _date_from_tags
+        tags = {
+            'QuickTime:CreateDate': '2018:06:08 12:57:46',
+            'QuickTime:MediaCreateDate': '2018:06:08 12:57:46',
+            'QuickTime:ContentCreateDate': '2017:06:24 09:55:46+10:00',
+        }
+        assert _date_from_tags(tags) == datetime(2017, 6, 24, 9, 55, 46)
+
+    def test_ios_local_time_tags_still_win(self):
+        from metadata_reader import _date_from_tags
+        tags = {
+            'QuickTime:CreationDate': '2026:07:04 14:48:46+12:00',
+            'QuickTime:ContentCreateDate': '2026:07:04 01:00:00+00:00',
+            'QuickTime:CreateDate': '2026:07:04 02:48:46',
+        }
+        assert _date_from_tags(tags) == datetime(2026, 7, 4, 14, 48, 46)
+
+    def test_falls_back_to_create_date_without_content_create_date(self):
+        from metadata_reader import _date_from_tags
+        assert _date_from_tags({'QuickTime:CreateDate': '2024:03:05 14:30:00'}) \
+            == datetime(2024, 3, 5, 14, 30, 0)
