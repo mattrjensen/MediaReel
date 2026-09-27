@@ -36,7 +36,7 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **Video support** — first-frame thumbnails via ffmpeg, duration badges, correct iOS video timezone handling
 
 ### Supported file types
-`.jpg` `.jpeg` `.png` `.heic` `.heif` `.mp4` `.mov` `.avi`
+`.jpg` `.jpeg` `.png` `.heic` `.heif` `.mp4` `.mov` `.m4v` `.avi`
 
 ---
 

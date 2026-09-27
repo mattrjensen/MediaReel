@@ -44,7 +44,7 @@ MediaReel/
 ```
 
 ## Supported file types
-`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.mp4`, `.mov`, `.avi`
+`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.mp4`, `.mov`, `.m4v`, `.avi`
 
 ## Core design principle
 The filename is the source of truth. The app is non-destructive until the user clicks Rename files. Everything before that is a preview. No files are touched on disk until Apply — except Delete, which is deliberately immediate rather than staged (after a confirmation, and into the Recycle Bin, so it stays recoverable). Files should be self-describing and self-ordering forever, independent of any app, platform, or cataloguing software.

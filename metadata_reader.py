@@ -19,10 +19,9 @@ def _vendor_path(filename: str) -> str:
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
-SUPPORTED_EXTENSIONS = {
-    '.jpg', '.jpeg', '.png', '.heic', '.heif',
-    '.mp4', '.mov', '.avi'
-}
+PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.heif'}
+VIDEO_EXTENSIONS = {'.mp4', '.mov', '.m4v', '.avi'}
+SUPPORTED_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
 
 DATE_SOURCE_METADATA = 'metadata'
 DATE_SOURCE_FILENAME = 'filename'
@@ -127,7 +126,7 @@ def _new_result(filepath: str) -> dict:
         'filepath': filepath,
         'filename': filename,
         'ext': path.suffix.lower(),
-        'is_video': path.suffix.lower() in {'.mp4', '.mov', '.avi'},
+        'is_video': path.suffix.lower() in VIDEO_EXTENSIONS,
         'is_already_formatted': is_already_formatted(filename),
         'date': None,
         'date_source': DATE_SOURCE_NONE,

@@ -122,3 +122,16 @@ class TestBuildNewFilename:
         dt = datetime(2024, 12, 15, 18, 30, 42)
         result = build_new_filename('IMG_20241215_183042.jpg', dt)
         assert result.count('20241215') == 1
+
+
+class TestExtensions:
+    def test_m4v_is_supported_and_treated_as_video(self):
+        from metadata_reader import SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, _new_result
+        assert '.m4v' in SUPPORTED_EXTENSIONS
+        assert '.m4v' in VIDEO_EXTENSIONS
+        assert _new_result('/no/such/clip.M4V')['is_video'] is True
+
+    def test_photos_are_not_videos(self):
+        from metadata_reader import SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS
+        assert not PHOTO_EXTENSIONS & VIDEO_EXTENSIONS
+        assert SUPPORTED_EXTENSIONS == PHOTO_EXTENSIONS | VIDEO_EXTENSIONS

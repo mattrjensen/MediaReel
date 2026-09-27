@@ -29,6 +29,7 @@ from PySide6.QtGui import QColor, QPixmap, QImage
 from metadata_reader import (
     read_metadata_batch, build_new_filename, file_size_bytes,
     SUPPORTED_EXTENSIONS,
+    VIDEO_EXTENSIONS,
     DATE_SOURCE_NONE, DATE_SOURCE_FILENAME, DATE_SOURCE_MODIFIED,
     DATE_SOURCE_METADATA, DATE_SOURCE_MANUAL
 )
@@ -783,7 +784,7 @@ class MediaTableModel(QAbstractTableModel):
                 filepath             = fp,
                 filename             = Path(fp).name,
                 ext                  = Path(fp).suffix.lower(),
-                is_video             = Path(fp).suffix.lower() in {'.mp4', '.mov', '.avi'},
+                is_video             = Path(fp).suffix.lower() in VIDEO_EXTENSIONS,
                 is_already_formatted = False,
                 date                 = None,
                 date_source          = DATE_SOURCE_NONE,
@@ -811,7 +812,7 @@ class MediaTableModel(QAbstractTableModel):
             self._pool.start(batch_worker)
 
         for i, fp in enumerate(filepaths):
-            is_video = Path(fp).suffix.lower() in {'.mp4', '.mov', '.avi'}
+            is_video = Path(fp).suffix.lower() in VIDEO_EXTENSIONS
             thumb_worker = ThumbnailWorker(i, fp, is_video, generation, self._current_generation_ref)
             thumb_worker.signals.thumb_ready.connect(self._on_thumb_ready)
             self._active_workers.append(thumb_worker)
