@@ -31,7 +31,7 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **Expand/compact view** — toggle between compact overview and expanded thumbnails for content-based ordering
 - **File size** — a narrow column shows each file's size in MB
 - **Delete a file** — a trash button on each row moves that file to the Recycle Bin after you confirm
-- **Thumbnail click to open** — in expanded mode, click a thumbnail to open the file in its default app (Photos, video player)
+- **Full-screen preview** — double-click a thumbnail for a big view of that photo or video (with playback controls). Left/Right step through the files in your current list order, Delete moves the file to the Recycle Bin, and closing the preview selects that file in the list. There's also an "Open in default app" button
 - **Non-destructive** — nothing is written to disk until you click Rename files. (The one exception is the trash button on each row, which — after asking you to confirm — moves that file to the Recycle Bin straight away.)
 - **Video support** — first-frame thumbnails via ffmpeg, duration badges, correct iOS video timezone handling
 
@@ -107,6 +107,7 @@ xcopy /E /I vendor dist\MediaReel\vendor
 ```
 MediaReel/
     main.py               # UI — PySide6 main window, delegates, toolbar
+    preview.py            # full-screen preview window (photos and video)
     media_model.py        # data model, file state logic, rename engine
     metadata_reader.py    # metadata reading and filename logic
     assets/               # icons and images
@@ -148,7 +149,7 @@ MVP — actively used and tested on real event photo collections.
   calendar picker — for files whose metadata is wrong (e.g. WhatsApp/shared media)
 - Hold-to-repeat move buttons
 - Expand/compact view toggle
-- Thumbnail click to open in default app
+- Full-screen preview of photos and video (double-click a thumbnail)
 
 **Planned:**
 - Padlock locking/unlocking per file

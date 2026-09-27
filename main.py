@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import math
-import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import (
     Qt, QSize, QRect, QEvent, QTimer, QRectF, QPointF, QStandardPaths, Signal,
@@ -31,6 +31,7 @@ from media_model import (
     MediaFileRole, DateSourceRole,
     IsInterpolatedRole, IsReAnchoredRole, NeedsAttentionRole
 )
+from preview import PreviewWindow
 
 # ── Size constants (mutable — updated by the expand/compact toggle) ──────────
 COMPACT_THUMB_W  = 80
@@ -1024,6 +1025,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
         self._model        = MediaTableModel()
         self._expanded     = False
+        self._preview      = None   # the open PreviewWindow, if any
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._on_repeat_tick)
         self._repeat_dir   = 0
@@ -1260,7 +1262,7 @@ class MainWindow(QMainWindow):
         self._btn_next.clicked.connect(lambda: self._step_attention(1))
         self._move_delegate.row_move_requested.connect(
             lambda row, direction: self._move(direction, row))
-        self._thumb_delegate.open_file_requested.connect(self._open_file)
+        self._thumb_delegate.open_file_requested.connect(self._open_preview)
         self._table.file_delete_requested.connect(self._delete_file)
 
         self._model.folder_load_started.connect(self._on_load_started)
@@ -1430,35 +1432,67 @@ class MainWindow(QMainWindow):
         self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
         self._table.setCurrentIndex(idx)
 
-    def _delete_file(self, f: MediaFile):
-        """The trash button on a row: confirm, then move that one file to the
-        Recycle Bin and remove its row. Only ever the clicked row's file —
-        not the whole selection — since a stray click shouldn't be able to
-        delete several photos."""
+    def _delete_file(self, f: MediaFile, parent=None, before_delete=None) -> bool:
+        """The trash button on a row (and the preview's Delete): confirm, then
+        move that one file to the Recycle Bin and remove its row. Only ever
+        the one file — not the whole selection — since a stray click
+        shouldn't be able to delete several photos. Returns True if the file
+        is gone.
+
+        parent is what the dialogs sit on top of — the preview window, when
+        that's where this was called from (a full-screen window would
+        otherwise hide them). before_delete, if given, runs after the user
+        has confirmed and just before the file is touched: the preview uses
+        it to let go of a playing video."""
         row = next((i for i, mf in enumerate(self._model.files()) if mf is f), None)
         if row is None:
-            return   # already gone (deleted from another route while the click was queued)
+            return False   # already gone (deleted from another route while the click was queued)
+        parent = parent or self
         reply = QMessageBox.question(
-            self, 'Delete file',
+            parent, 'Delete file',
             f'Delete "{f.filename}"?\n\nIt will be moved to the Recycle Bin.',
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
-            return
+            return False
+        if before_delete:
+            before_delete()
         if not self._model.delete_file(row):
             QMessageBox.warning(
-                self, 'Could not delete file',
+                parent, 'Could not delete file',
                 f'"{f.filename}" could not be moved to the Recycle Bin.\n\n'
                 f'Check that it isn\'t open in another application. Files on '
                 f'a network drive can\'t be moved to the Recycle Bin.')
-            return
+            return False
         self._refresh_status()
         self._refresh_move_buttons()
+        return True
 
-    def _open_file(self, filepath: str):
-        try:
-            os.startfile(filepath)
-        except Exception:
-            pass
+    def _open_preview(self, filepath: str):
+        """Double-click on a thumbnail: the full-screen preview, starting on
+        that file."""
+        f = next((mf for mf in self._model.files() if mf.filepath == filepath), None)
+        if f is None:
+            return
+        dlg = PreviewWindow(self._model, f, self._delete_file, parent=self)
+        dlg.finished.connect(lambda _result, d=dlg: self._on_preview_closed(d.current_file))
+        self._preview = dlg   # keep it alive while it's showing
+        dlg.showFullScreen()
+
+    def _on_preview_closed(self, f: Optional[MediaFile]):
+        """Select the file the preview ended on and bring it into view, since
+        stepping through the preview may have taken it a long way from where
+        the table was scrolled."""
+        self._preview = None
+        if f is None:
+            return   # the last file was deleted from inside the preview
+        row = next((i for i, mf in enumerate(self._model.files()) if mf is f), None)
+        if row is None:
+            return
+        idx = self._model.index(row, COL_FILENAME)
+        self._table.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        self._table.selectRow(row)
+        self._table.setCurrentIndex(idx)
+        self._table.setFocus()
 
     def _on_move_pressed(self, direction: int):
         self._repeat_dir   = direction

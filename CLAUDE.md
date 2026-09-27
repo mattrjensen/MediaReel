@@ -12,7 +12,8 @@ The app is intentionally single-session and non-destructive — no files are tou
 ## Tech stack
 - Python 3.14
 - PySide6 (UI framework)
-- Pillow (image thumbnails)
+- Pillow (image thumbnails, and the preview's screen-size photo decode)
+- QtMultimedia (`QMediaPlayer`, `QVideoWidget`; video playback in the full-screen preview — ships with PySide6)
 - pillow-heif (HEIC/HEIF thumbnail decoding — registers a Pillow opener;
   without it, `.heic`/`.heif` files silently get no thumbnail. Listed in
   `requirements.txt`. `media_model.py` imports it in a `try/except
@@ -34,6 +35,7 @@ MediaReel/
     metadata_reader.py    ← done and tested
     media_model.py        ← done
     main.py               ← done
+    preview.py            ← full-screen preview window (photos + video)
     tests/                ← pytest tests (test_*.py) + standalone diagnostic_*.py scripts
     assets/               ← icons and images
     requirements.txt      ← pinned runtime dependencies (incl. pillow-heif)
@@ -458,7 +460,7 @@ up, Move down and Rename files are all visible but disabled; only Open folder
 is live.
 
 - **Open folder** — opens file picker, loads folder, shows spinner overlay while metadata reads
-- **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Disabled until a folder with at least one file is loaded (`_refresh_status` / `_on_load_started`). In expanded mode, clicking a thumbnail opens the file in its default app via `os.startfile(filepath)`.
+- **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Disabled until a folder with at least one file is loaded (`_refresh_status` / `_on_load_started`). Double-clicking a thumbnail (either mode) opens the full-screen preview — see "Full-screen preview".
 - **`⚠ {n} file(s) need ordering`** + **Prev** / **Next** — a status *label* (deliberately not a button, so no border/background) with two buttons beside it. The label is amber with a ⚠ while any file has `needs_attention=True`, and plain grey `0 file(s) need ordering` otherwise — including before a folder is loaded (`_refresh_attention_controls` swaps the style only when that state changes, since `setStyleSheet` is slow-ish). Prev/Next step backward/forward through the flagged files (`MainWindow._step_attention`), scrolling the row to the centre and making it current. They work from the table's *current row* rather than a remembered position in the flagged list — flagged files move and stop being flagged as you work on them, which would leave a stored position pointing at the wrong file. They **don't wrap**: past the last flagged file Next is greyed out, and before the first Prev is (`_attention_target` returns `None` there, and `_refresh_attention_controls` disables the button rather than leaving it to silently do nothing). Because that depends on the current row as well as the flagged set, `_refresh_attention_controls` also runs on the selection model's `currentChanged`, not just from `_refresh_status`. With no current row, both are enabled — Next goes to the first flagged file and Prev to the last. With nothing flagged there's nowhere to go, so both are disabled. (Making the row current also selects it, collapsing any multi-selection to that row.)
 - **`{n} selected`** + **▲ Move up** / **▼ Move down** — the Move buttons act on all selected rows as a group, maintaining relative order within the group; selection follows the moved rows. The count before them says how many rows a click is about to move. It's the compact form of the status bar's "file(s) selected" because the toolbar is nearly full. Set from `_refresh_status`; reads `0 selected` before a folder has loaded and at the start of a load. Up comes before Down.
 - **`{n} file(s) to be renamed.`** — grey text just left of Rename files; empty when nothing's pending. (Also in the status bar, below.)
@@ -889,24 +891,82 @@ Implementation:
 
 Do not apply hold-to-repeat to the per-row chevrons — toolbar buttons only.
 
-### Thumbnail click — open in default app
-A double-click on a thumbnail cell opens the file in its default application
-via `os.startfile(filepath)`, in both compact and expanded mode. On Windows
-this opens photos in Photos and videos in the default video player. Because
-the actual file path is passed, Photos loads the file in folder context —
-left/right arrow keys in Photos then navigate through the other files in the
-same folder, which is useful for determining correct ordering of undated
-files.
-
-Double-click, not single click, in both modes — a single click is too easy
-to trigger accidentally, especially on the small compact-mode thumbnail.
+### Full-screen preview
+A double-click on a thumbnail cell (compact or expanded) opens `PreviewWindow`
+(`preview.py`) — a larger look at one file than Expanded View gives, for the
+times you need to actually review it. It replaces the old behaviour of handing
+the file to the default app (`os.startfile`); that survives as the preview's
+**Open in default app** button. Double-click, not single click: a single click
+is too easy to trigger accidentally, especially on the small compact-mode
+thumbnail.
 
 Implementation: `ThumbnailDelegate` detects `QEvent.MouseButtonDblClick` in
-`editorEvent()`. It emits a signal `open_file_requested = Signal(str)` with
-the filepath, connected to a slot in `MainWindow` that calls
-`os.startfile(filepath)`. `self._expanded` (set via `set_expanded(bool)` from
-the toolbar toggle handler) still controls thumbnail scaling in `paint()`; it
-no longer gates whether a click opens the file.
+`editorEvent()` and emits `open_file_requested = Signal(str)` (the filepath),
+connected to `MainWindow._open_preview`, which finds the `MediaFile` and shows
+the window with `showFullScreen()` (a modal `QDialog`, kept in
+`MainWindow._preview` while it's up). `self._expanded` only controls thumbnail
+scaling in `paint()`.
+
+**Navigation.** Left / Right (or the Prev / Next buttons) step to the previous
+/ next file *in the table's current order* — up / down the list — not the
+folder's order, so it follows any moves the user has made. Like the toolbar's
+Prev/Next it dead-ends rather than wrapping: the button is greyed at each end
+and the key does nothing. The current file is tracked by identity
+(`_index()` searches `model.files()` for the `MediaFile`), never by a stored
+row number, since rows move and disappear. The info line shows `n / total`,
+the date and its source badge, the size, and — when one is pending — the name
+the file will be renamed to.
+
+**On close** (Esc or the Close button), `MainWindow._on_preview_closed`
+selects the file the preview ended on and scrolls it to the centre of the table
+(`scrollTo` + `selectRow` + `setCurrentIndex`), since stepping may have taken
+it a long way from where the table was.
+
+**Delete** (Delete key or button) goes through the same
+`MainWindow._delete_file(f, parent, before_delete)` as the row's trash button —
+so the same confirmation, the same Recycle Bin, the same "could not delete"
+message — with the confirmation parented to the preview (a full-screen window
+would otherwise hide it). Afterwards the preview lands on the next file, or the
+one above if that was the last, or closes if it was the only file.
+`before_delete` runs after the user confirms and before the file is touched:
+a playing video has the file open, and **Windows won't move an open file to the
+Recycle Bin**, so the preview releases the player there (`_release_media()`:
+`stop()` + `setSource(QUrl())`) rather than up front — declining the
+confirmation must not stop the video. If the trash then fails, the file is put
+back on screen.
+
+**Photos** are decoded on a worker thread (`_ImageLoader` on the global
+`QThreadPool`, results delivered through one `_LoadSignals` object owned by the
+window) at *screen size* — never full resolution; this is a fit-to-screen
+viewer with no zoom. JPEGs use Pillow's `draft()` so libjpeg decodes at a
+reduced scale, EXIF orientation is applied, and the result is a `QImage` that
+owns its pixels (never a `QPixmap` off the GUI thread). A small file is
+enlarged to fill the view, capped at `MAX_UPSCALE` (3x). The neighbours on
+either side are prefetched into a small LRU (`CACHE_SIZE`) so stepping is
+quick; a photo that hasn't arrived yet shows "Loading…", one that can't be read
+shows "Can't display this file".
+
+**Video** plays through `QMediaPlayer` + `QAudioOutput` + `QVideoWidget`, and
+starts playing when it's shown. The bottom bar (hidden for photos) has
+Play/Pause, a seek slider (a click jumps to that point), `m:ss / m:ss`, and
+Mute (which persists across files). Space toggles play/pause; pressing it after
+the clip has ended replays from the start. A file that can't be played shows
+the reason and points at "Open in default app". Moving to another file always
+releases the player first, so one clip's sound never carries on under the next.
+
+`tests/diagnostic_video_playback.py` is the standalone check that Qt can decode
+real clips (H.264, HEVC, MPEG-4, MJPEG, XVID: all passed against the author's
+library). Two things it can't tell you: whether playback is *smooth* or
+audio/video *in sync* (needs a person watching), and it prints
+`Failed setup for format d3d11: hwaccel initialisation returned error` for some
+H.264 clips — Qt falls back to software decoding and they still play, but heavy
+4K clips may be less smooth on that path. Not yet built: the packaged `.exe`'s
+size with QtMultimedia and its FFmpeg libraries (expected: tens of MB).
+
+**Testing gotcha:** don't wait on the preview's background photo load with
+`QTest.qWait` in a script — it starves the worker threads (the decode "takes"
+exactly as long as the wait). Use `app.exec()` with a `QTimer`, or a Python
+loop of `processEvents()` + `time.sleep()`. The real app's event loop is fine.
 
 ### On folder load
 - Stub rows inserted immediately (filename only) so table appears instantly
@@ -1109,6 +1169,7 @@ metadata_load_error = Signal(str)       # exiftool could not start at all
   instead of one per file — see Threading
 - `media_model.py` — MediaFile dataclass + MediaTableModel, full five-state logic with user_moved, effective_date, interpolation, apply_rename
 - `main.py` — main window, toolbar, table view, all delegates, loading overlay, selection retention on move
+- `preview.py` — the full-screen preview window: photos (async, screen-size decode, neighbour prefetch) and video, with Left/Right navigation and delete — see "Full-screen preview"
 - Editable New filename column, its per-file reset, and per-file manual
   date/time editing — see "Editable New filename column" and "Per-file
   date/time editing" under UI behaviour
