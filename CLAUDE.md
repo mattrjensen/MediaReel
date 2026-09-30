@@ -903,8 +903,14 @@ thumbnail.
 Implementation: `ThumbnailDelegate` detects `QEvent.MouseButtonDblClick` in
 `editorEvent()` and emits `open_file_requested = Signal(str)` (the filepath),
 connected to `MainWindow._open_preview`, which finds the `MediaFile` and shows
-the window with `showFullScreen()` (a modal `QDialog`, kept in
-`MainWindow._preview` while it's up). `self._expanded` only controls thumbnail
+the window with `open_on_screen()` (a modal, frameless `QDialog`, kept in
+`MainWindow._preview` while it's up). **It fills `screen.availableGeometry()` —
+everything except the taskbar — rather than using `showFullScreen()`.** On
+Windows `showFullScreen()` didn't cover the taskbar, which then sat on top of the
+bottom of the window: exactly where the video controls are, so a real user saw no
+Play button or seek slider at all. It also left a strip of border down the right
+edge. Sizing to the usable area keeps every control on screen wherever the
+taskbar is (or isn't); the cost is that the taskbar stays visible. `self._expanded` only controls thumbnail
 scaling in `paint()`.
 
 **Navigation.** Left / Right (or the Prev / Next buttons) step to the previous
@@ -925,8 +931,8 @@ it a long way from where the table was.
 **Delete** (Delete key or button) goes through the same
 `MainWindow._delete_file(f, parent, before_delete)` as the row's trash button —
 so the same confirmation, the same Recycle Bin, the same "could not delete"
-message — with the confirmation parented to the preview (a full-screen window
-would otherwise hide it). Afterwards the preview lands on the next file, or the
+message — with the confirmation parented to the preview (a window covering the
+screen would otherwise hide it). Afterwards the preview lands on the next file, or the
 one above if that was the last, or closes if it was the only file.
 `before_delete` runs after the user confirms and before the file is touched:
 a playing video has the file open, and **Windows won't move an open file to the
@@ -935,22 +941,40 @@ Recycle Bin**, so the preview releases the player there (`_release_media()`:
 confirmation must not stop the video. If the trash then fails, the file is put
 back on screen.
 
-**Photos** are decoded on a worker thread (`_ImageLoader` on the global
-`QThreadPool`, results delivered through one `_LoadSignals` object owned by the
-window) at *screen size* — never full resolution; this is a fit-to-screen
-viewer with no zoom. JPEGs use Pillow's `draft()` so libjpeg decodes at a
-reduced scale, EXIF orientation is applied, and the result is a `QImage` that
-owns its pixels (never a `QPixmap` off the GUI thread). A small file is
-enlarged to fill the view, capped at `MAX_UPSCALE` (3x). The neighbours on
-either side are prefetched into a small LRU (`CACHE_SIZE`) so stepping is
-quick; a photo that hasn't arrived yet shows "Loading…", one that can't be read
+**Photos** are decoded on a worker thread (`_ImageLoader`, results delivered
+through one `_LoadSignals` object owned by the window) at *screen size* —
+never full resolution; this is a fit-to-screen viewer with no zoom. JPEGs use
+Pillow's `draft()` so libjpeg decodes at a reduced scale, EXIF orientation is
+applied, and the result is a `QImage` that owns its pixels (never a `QPixmap`
+off the GUI thread). A small file is enlarged to fill the view, capped at
+`MAX_UPSCALE` (3x). The neighbours on either side are prefetched into a small
+LRU (`CACHE_SIZE`) so stepping is quick; a photo that hasn't arrived yet shows
+"Loading…", one that can't be read
+
+**`_PREVIEW_POOL`, a dedicated two-thread `QThreadPool`, not
+`QThreadPool.globalInstance()`.** A real user hit a "Loading…" that stuck
+around for tens of seconds on a ~1700-file folder — traced (via temporary
+timing prints, since nothing in this app's own testing reproduced it: window
+construction and `open_on_screen()` together took under 300ms) to the photo
+decode queuing behind `media_model.py`'s `ThumbnailWorker` backlog, which is
+handed every file in the folder as soon as it loads and, per Threading above,
+can take up to ~54s for 2000 files — both were submitting to the same global
+pool. A preview opened before thumbnails finished had its own decode stuck
+behind however much of that backlog was still outstanding. `_PREVIEW_POOL`
+gives the preview its own, separate queue so it's never behind a folder's
+worth of thumbnail jobs; two threads is enough since this only ever services
+the file on screen plus its two prefetched neighbours, not a whole folder.
+`tests/test_preview.py::TestDecodeUsesItsOwnThreadPool` saturates the global
+pool with blocking jobs and asserts a decode still completes promptly.
 shows "Can't display this file".
 
 **Video** plays through `QMediaPlayer` + `QAudioOutput` + `QVideoWidget`, and
 starts playing when it's shown. The bottom bar (hidden for photos) has
 Play/Pause, a seek slider (a click jumps to that point), `m:ss / m:ss`, and
-Mute (which persists across files). Space toggles play/pause; pressing it after
-the clip has ended replays from the start. A file that can't be played shows
+Mute (which persists across files). Space toggles play/pause. When a clip
+reaches its end it rewinds to the start and waits there *paused* (`_on_media_status`:
+`setPosition(0)` + `pause()`), so the first frame is showing and Play watches it
+again — left to itself the video surface goes blank at the end. A file that can't be played shows
 the reason and points at "Open in default app". Moving to another file always
 releases the player first, so one clip's sound never carries on under the next.
 

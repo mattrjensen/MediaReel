@@ -275,3 +275,73 @@ class TestPhotoCache:
         h.win._stage.show_message('Loading…')
         h.win._on_image_loaded('/no/such/dir/zzz.jpg', preview.QImage(10, 10, preview.QImage.Format_RGB888))
         assert h.win._stage._image is None
+
+
+class TestEndOfVideo:
+    def test_reaching_the_end_rewinds_and_waits_paused(self, harness):
+        # Otherwise the video surface is left blank at the end.
+        from PySide6.QtMultimedia import QMediaPlayer
+        h = harness(NAMES, 'a.jpg')
+        calls = []
+        h.win._player.setPosition = lambda ms: calls.append(('setPosition', ms))
+        h.win._player.pause = lambda: calls.append(('pause',))
+        h.win._on_media_status(QMediaPlayer.EndOfMedia)
+        assert calls == [('setPosition', 0), ('pause',)]
+
+    def test_other_statuses_leave_playback_alone(self, harness):
+        from PySide6.QtMultimedia import QMediaPlayer
+        h = harness(NAMES, 'a.jpg')
+        calls = []
+        h.win._player.setPosition = lambda ms: calls.append('setPosition')
+        h.win._player.pause = lambda: calls.append('pause')
+        for status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia,
+                       QMediaPlayer.LoadingMedia):
+            h.win._on_media_status(status)
+        assert calls == []
+
+
+class TestDecodeUsesItsOwnThreadPool:
+    """A photo decode must not queue behind media_model.py's ThumbnailWorker
+    backlog on QThreadPool.globalInstance() — see _PREVIEW_POOL in preview.py.
+    A folder load hands the global pool every file (up to ~54s for 2000
+    files), so before this, opening the preview while thumbnails were still
+    generating could leave "Loading…" up for as long as that backlog took
+    to drain."""
+
+    def test_decode_still_completes_promptly_when_the_global_pool_is_saturated(
+            self, harness, tmp_path):
+        import time
+        from PIL import Image
+        from PySide6.QtCore import QRunnable, QThreadPool
+        from PySide6.QtWidgets import QApplication
+
+        photo = tmp_path / 'photo.jpg'
+        Image.new('RGB', (200, 150), 'green').save(photo)
+
+        pool = QThreadPool.globalInstance()
+
+        class _Blocker(QRunnable):
+            def run(self):
+                time.sleep(0.8)
+
+        # Saturate every slot in the global pool, the way an eager
+        # thumbnail-generation batch would.
+        for _ in range(pool.maxThreadCount()):
+            pool.start(_Blocker())
+
+        h = harness(['photo.jpg'], 'photo.jpg')
+        h.by_name['photo.jpg'].filepath = str(photo)
+        h.win._cache.clear()
+        h.win._show_photo(str(photo))
+
+        app = QApplication.instance()
+        deadline = time.monotonic() + 2.0   # generous, but far under the
+        # ~0.8s+ a queued-behind-the-global-pool decode would need once every
+        # blocker is also competing for the same slots.
+        while h.win._stage._image is None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+
+        assert h.win._stage._image is not None, (
+            'decode did not complete promptly — it may be queued behind '
+            'the (saturated) global thread pool instead of using its own')

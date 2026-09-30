@@ -1476,7 +1476,7 @@ class MainWindow(QMainWindow):
         dlg = PreviewWindow(self._model, f, self._delete_file, parent=self)
         dlg.finished.connect(lambda _result, d=dlg: self._on_preview_closed(d.current_file))
         self._preview = dlg   # keep it alive while it's showing
-        dlg.showFullScreen()
+        dlg.open_on_screen()
 
     def _on_preview_closed(self, f: Optional[MediaFile]):
         """Select the file the preview ended on and bring it into view, since

@@ -20,9 +20,9 @@ from collections import OrderedDict
 from typing import Callable, Optional
 
 from PySide6.QtCore import (
-    QObject, QRect, QRunnable, QThreadPool, QUrl, Qt, Signal,
+    QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, QUrl, Qt, Signal,
 )
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -105,6 +105,18 @@ class _LoadSignals(QObject):
     loaded = Signal(str, object)   # filepath, QImage or None if unreadable
 
 
+# A photo decode must never queue behind media_model.py's ThumbnailWorker
+# backlog on QThreadPool.globalInstance() — that pool is handed every file in
+# the folder as soon as it loads (up to ~54s for 2000 files per CLAUDE.md),
+# so a preview opened before thumbnails finish would otherwise sit in the
+# same queue behind however many of those are still pending, which is
+# exactly what a "Loading…" that hangs for tens of seconds turned out to be.
+# Two threads is plenty — this only ever services the file on screen plus its
+# two prefetched neighbours (_prefetch_neighbours), not a whole folder.
+_PREVIEW_POOL = QThreadPool()
+_PREVIEW_POOL.setMaxThreadCount(2)
+
+
 class _ImageLoader(QRunnable):
     def __init__(self, filepath: str, max_w: int, max_h: int, signals: _LoadSignals):
         super().__init__()
@@ -171,6 +183,57 @@ class _SeekSlider(QSlider):
         super().mousePressEvent(event)
 
 
+def _draw_play_triangle(painter: QPainter, size: int, color: str):
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    w, h = size * 0.55, size * 0.65
+    x, y = (size - w) / 2 + size * 0.05, (size - h) / 2   # nudge right: an
+    # apex-right triangle sits slightly left of visual centre otherwise.
+    painter.drawPolygon([QPointF(x, y), QPointF(x, y + h), QPointF(x + w, y + h / 2)])
+
+
+def _draw_pause_bars(painter: QPainter, size: int, color: str):
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    bar_w, bar_h, gap = size * 0.16, size * 0.6, size * 0.16
+    y = (size - bar_h) / 2
+    radius = bar_w * 0.3
+    for x in (size / 2 - gap / 2 - bar_w, size / 2 + gap / 2):
+        painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), radius, radius)
+
+
+def _draw_trash(painter: QPainter, size: int, color: str):
+    """The row Delete button's trash can (DeleteDelegate, main.py), redrawn at
+    icon scale — same shape and relative proportions, just resized to fit
+    here instead of a fixed 28x24 button."""
+    painter.setRenderHint(QPainter.Antialiasing)
+    s = size / 24.0
+    x, y = size / 2 - 6 * s, size / 2 - 7 * s
+    painter.setPen(QPen(QColor(color), 1.3 * s))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawLine(QPointF(x - 0.5 * s, y + 2.5 * s), QPointF(x + 12.5 * s, y + 2.5 * s))   # lid
+    painter.drawLine(QPointF(x + 4 * s, y + 0.5 * s), QPointF(x + 8 * s, y + 0.5 * s))         # handle
+    painter.drawLine(QPointF(x + 4 * s, y + 0.5 * s), QPointF(x + 4 * s, y + 2.5 * s))
+    painter.drawLine(QPointF(x + 8 * s, y + 0.5 * s), QPointF(x + 8 * s, y + 2.5 * s))
+    painter.drawPolyline([QPointF(x + 1.5 * s, y + 4.5 * s), QPointF(x + 2.5 * s, y + 14 * s),  # body
+                          QPointF(x + 9.5 * s, y + 14 * s), QPointF(x + 10.5 * s, y + 4.5 * s)])
+    painter.drawLine(QPointF(x + 4.5 * s, y + 6.5 * s), QPointF(x + 4.5 * s, y + 11.5 * s))     # ribs
+    painter.drawLine(QPointF(x + 7.5 * s, y + 6.5 * s), QPointF(x + 7.5 * s, y + 11.5 * s))
+
+
+def _icon(draw_fn: Callable, color: str, size: int = 40) -> QIcon:
+    """Renders at `size` (bigger than any icon it'll actually be shown at) so
+    it stays crisp once QPushButton scales it down to its iconSize()."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    draw_fn(painter, size, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def _separator() -> QFrame:
     """A thin vertical rule between groups of buttons in the top bar."""
     line = QFrame()
@@ -211,6 +274,8 @@ class PreviewWindow(QDialog):
         self._signals.loaded.connect(self._on_image_loaded)
 
         self.setWindowTitle('Preview')
+        # No title bar: the window is laid over the screen by open_on_screen().
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setModal(True)
         self.setAutoFillBackground(True)
         pal = self.palette()
@@ -251,7 +316,14 @@ class PreviewWindow(QDialog):
         top.addWidget(self._btn_prev)
         top.addWidget(self._btn_next)
         top.addWidget(_separator())
-        top.addWidget(_button('Delete', self._delete_current, 'previewDelete'))
+        btn_delete = _button('Delete', self._delete_current, 'previewDelete')
+        btn_delete.setIcon(_icon(_draw_trash, '#FCA5A5', size=64))
+        # 24, not a small icon size: _draw_trash always draws its glyph at
+        # exactly half its canvas (12/24 wide, 14/24 tall — see the function),
+        # so this reproduces the same ~12x14px the row's Delete button draws
+        # natively, rather than shrinking it the way a small iconSize did.
+        btn_delete.setIconSize(QSize(24, 24))
+        top.addWidget(btn_delete)
         top.addWidget(_button('Close', self.reject))
 
         # Centre: the photo/message view or the video, one at a time.
@@ -269,8 +341,15 @@ class PreviewWindow(QDialog):
         ctl = QHBoxLayout(self._controls)
         ctl.setContentsMargins(12, 8, 12, 8)
         ctl.setSpacing(10)
-        self._btn_play = _button('Play', self._toggle_play)
-        self._btn_play.setMinimumWidth(80)
+        # Icon-only, not "Play"/"Pause" text: the shape (triangle vs. two
+        # bars) is the standard convention, and a tooltip covers discovery.
+        self._icon_play  = _icon(_draw_play_triangle, '#F9FAFB')
+        self._icon_pause = _icon(_draw_pause_bars, '#F9FAFB')
+        self._btn_play = _button('', self._toggle_play)
+        self._btn_play.setIcon(self._icon_play)
+        self._btn_play.setIconSize(QSize(15, 15))
+        self._btn_play.setToolTip('Play')
+        self._btn_play.setMinimumWidth(56)
         self._slider = _SeekSlider(Qt.Horizontal)
         self._slider.setFocusPolicy(Qt.NoFocus)
         self._lbl_time = QLabel('0:00 / 0:00')
@@ -296,10 +375,21 @@ class PreviewWindow(QDialog):
         self._player.positionChanged.connect(self._on_position)
         self._player.durationChanged.connect(self._on_duration)
         self._player.playbackStateChanged.connect(self._on_playback_state)
+        self._player.mediaStatusChanged.connect(self._on_media_status)
         self._player.errorOccurred.connect(self._on_player_error)
         self._slider.sliderMoved.connect(self._player.setPosition)
 
     # ── public ───────────────────────────────────────────────────────────────
+
+    def open_on_screen(self):
+        """Show the window filling the usable part of its screen — everything
+        except the taskbar. Not showFullScreen(): on Windows that didn't cover
+        the taskbar, which then sat on top of the bottom of the window — right
+        where the video controls are — and left a strip of border on the right.
+        Sizing to availableGeometry() keeps every control on screen wherever
+        the taskbar is (or isn't)."""
+        self.setGeometry(self.screen().availableGeometry())
+        self.show()
 
     @property
     def current_file(self) -> Optional[MediaFile]:
@@ -404,7 +494,7 @@ class PreviewWindow(QDialog):
             return
         self._pending.add(path)
         loader = _ImageLoader(path, *self._target_size(), self._signals)
-        QThreadPool.globalInstance().start(loader)
+        _PREVIEW_POOL.start(loader)
 
     def _on_image_loaded(self, path: str, image):
         self._pending.discard(path)
@@ -455,9 +545,18 @@ class PreviewWindow(QDialog):
         self._lbl_time.setText(
             f'{format_time(self._player.position())} / {format_time(ms)}')
 
+    def _on_media_status(self, status):
+        # A clip that reaches the end would otherwise be left on a blank
+        # surface. Go back to the start and wait there, paused, so the first
+        # frame is showing and Play watches it again.
+        if status == QMediaPlayer.EndOfMedia:
+            self._player.setPosition(0)
+            self._player.pause()
+
     def _on_playback_state(self, state):
-        self._btn_play.setText(
-            'Pause' if state == QMediaPlayer.PlayingState else 'Play')
+        playing = state == QMediaPlayer.PlayingState
+        self._btn_play.setIcon(self._icon_pause if playing else self._icon_play)
+        self._btn_play.setToolTip('Pause' if playing else 'Play')
 
     def _on_player_error(self, error, message: str):
         if self._file is None or not self._file.is_video:
