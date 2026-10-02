@@ -1091,6 +1091,7 @@ class MainWindow(QMainWindow):
         self._expanded     = False
         self._preview      = None   # the open PreviewWindow, if any
         self._current_folder = None   # path last passed to load_folder(), for the Reload button
+        self._pending_scroll_restore = None   # set by _reload_folder(), consumed by _on_load_complete()
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._on_repeat_tick)
         self._repeat_dir   = 0
@@ -1389,8 +1390,16 @@ class MainWindow(QMainWindow):
         deleted-outside-the-app files disappear, and any refreshed metadata
         (e.g. a file edited elsewhere) is picked up. Everything staged only
         in memory (moves, manual dates/filenames, selection) is lost, same
-        as switching to a different folder already does without asking."""
+        as switching to a different folder already does without asking.
+
+        Unlike switching folders, though, it's still the *same* folder you
+        were looking at — so where you were scrolled to is worth keeping.
+        Captured here and restored in _on_load_complete() once the reload
+        has actually finished sorting/classifying; _open_folder() doesn't
+        set this, so opening a genuinely different folder still starts at
+        the top, same as before."""
         if self._current_folder:
+            self._pending_scroll_restore = self._table.verticalScrollBar().value()
             self._model.load_folder(self._current_folder)
 
     def _move(self, direction: int, clicked_row: int = -1):
@@ -1645,6 +1654,12 @@ class MainWindow(QMainWindow):
         self._overlay.stop()
         self._refresh_status()
 
+        if self._pending_scroll_restore is not None:
+            # Clamped to the new row count automatically if the reload
+            # dropped files; nothing extra needed for a now-shorter list.
+            self._table.verticalScrollBar().setValue(self._pending_scroll_restore)
+            self._pending_scroll_restore = None
+
         # Once per session, and only when it matters: the folder has HEIC
         # files but pillow-heif isn't installed, so they'll have no
         # thumbnails. Deferred so the dialog doesn't run a nested event loop
@@ -1703,11 +1718,12 @@ class MainWindow(QMainWindow):
         # Taken first: the resort below reorders rows, and the view would
         # otherwise be left wherever that lands it.
         scroll_pos = self._table.verticalScrollBar().value()
-        if errors == 0:
-            QMessageBox.information(
-                self, 'Done',
-                f'{success} file(s) renamed successfully.')
-        else:
+        # No "Done" dialog on a clean run — the row count/preview column
+        # updating live, right there, already says it worked; a modal just
+        # to say so again is an extra click for no new information. Errors
+        # are different: a file that failed to rename is silent otherwise,
+        # so that dialog stays.
+        if errors != 0:
             QMessageBox.warning(
                 self, 'Rename complete with errors',
                 f'{success} file(s) renamed.\n'

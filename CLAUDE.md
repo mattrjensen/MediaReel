@@ -337,8 +337,10 @@ After apply_rename() completes (success or partial), the model should call
 re-sorts the list so newly renamed files (now prefixed with `YYYYMMDD_HHMMSS`)
 appear in correct alphabetical/chronological order alongside any other
 already-formatted files. Remaining unmoved weak anchors stay flagged at the
-end. This resort is triggered from `_on_rename_complete` in `main.py` after
-the success/error dialog is dismissed.
+end. This resort is triggered from `_on_rename_complete` in `main.py` —
+immediately on a clean run, or after the error dialog is dismissed if any
+file failed (see "Apply rename confirmation dialog" below for why a clean
+run has no dialog of its own to wait for).
 The vertical scroll position is preserved across all of this:
 `_on_rename_complete` reads `verticalScrollBar().value()` before anything
 else and sets it back after the resort and recalculate. (It used to
@@ -358,6 +360,15 @@ Continue?
 the same way `apply_rename()` itself decides what to rename; see "Editable
 New filename column"). Implementation: a single `QMessageBox` call in
 `MainWindow._apply_rename()`.
+
+**No dialog afterward on a clean run.** `_on_rename_complete` used to follow
+up with a "Done — {n} file(s) renamed successfully" box; it's gone — the
+table updating live (row count, New filename column, badges) already says
+it worked, and clicking through a second confirmation that only restates
+that added a step without new information. A run with failures still gets
+`QMessageBox.warning` with the success/error counts, since a silently
+failed rename (e.g. a file open in another program) is exactly the kind of
+thing that needs surfacing, not something already visible elsewhere.
 
 ---
 
@@ -460,7 +471,7 @@ Next, Move up, Move down and Rename files are all visible but disabled; only
 Open folder is live.
 
 - **Open folder** — opens file picker, loads folder, shows spinner overlay while metadata reads
-- **Reload this folder** — icon-only, next to Open folder: a clockwise circular-arrow icon (`_refresh_icon()`), drawn with `QPainter` like the calendar/trash icons rather than a Unicode glyph such as `↻` — one was tried and rendered as a missing-glyph box on a real machine, exactly the failure those other icons were already built to avoid. Built with an explicit `QIcon.Disabled` pixmap in `#9CA3AF` (the same grey `_btn_style()`'s disabled text uses), not left to Qt's own graying, which barely dimmed it. Re-runs `load_folder()` on whatever folder path `_open_folder` last recorded (`MainWindow._current_folder`), so new files on disk show up and ones removed outside the app disappear. Discards every bit of in-memory staging (moves, manual dates/filenames, selection) exactly the way opening a *different* folder already does, silently — no confirmation, for the same reason. Disabled alongside Expand View until a folder with at least one file is loaded.
+- **Reload this folder** — icon-only, next to Open folder: a clockwise circular-arrow icon (`_refresh_icon()`), drawn with `QPainter` like the calendar/trash icons rather than a Unicode glyph such as `↻` — one was tried and rendered as a missing-glyph box on a real machine, exactly the failure those other icons were already built to avoid. Built with an explicit `QIcon.Disabled` pixmap in `#9CA3AF` (the same grey `_btn_style()`'s disabled text uses), not left to Qt's own graying, which barely dimmed it. Re-runs `load_folder()` on whatever folder path `_open_folder` last recorded (`MainWindow._current_folder`), so new files on disk show up and ones removed outside the app disappear. Discards every bit of in-memory staging (moves, manual dates/filenames, selection) exactly the way opening a *different* folder already does, silently — no confirmation, for the same reason (deliberate: a user may well click Reload specifically to discard staged edits, same as a browser refresh). The one thing it does carry over is scroll position — unlike opening a different folder, it's still the folder you were looking at, so `_reload_folder()` records `verticalScrollBar().value()` into `MainWindow._pending_scroll_restore` before calling `load_folder()`, and `_on_load_complete()` restores it (clamped automatically if the reload left fewer rows) and clears the field. `_open_folder()` never sets that field, so opening a genuinely different folder is unaffected and still starts at the top. Disabled alongside Expand View until a folder with at least one file is loaded.
 - **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Disabled until a folder with at least one file is loaded (`_refresh_status` / `_on_load_started`). Double-clicking a thumbnail (either mode) opens the full-screen preview — see "Full-screen preview".
 - **`⚠ {n} file(s) need ordering`** + **Prev** / **Next** — a status *label* (deliberately not a button, so no border/background) with two buttons beside it. The label is amber with a ⚠ while any file has `needs_attention=True`, and plain grey `0 file(s) need ordering` otherwise — including before a folder is loaded (`_refresh_attention_controls` swaps the style only when that state changes, since `setStyleSheet` is slow-ish). Prev/Next step backward/forward through the flagged files (`MainWindow._step_attention`), scrolling the row to the centre and making it current. They work from the table's *current row* rather than a remembered position in the flagged list — flagged files move and stop being flagged as you work on them, which would leave a stored position pointing at the wrong file. They **don't wrap**: past the last flagged file Next is greyed out, and before the first Prev is (`_attention_target` returns `None` there, and `_refresh_attention_controls` disables the button rather than leaving it to silently do nothing). Because that depends on the current row as well as the flagged set, `_refresh_attention_controls` also runs on the selection model's `currentChanged`, not just from `_refresh_status`. With no current row, both are enabled — Next goes to the first flagged file and Prev to the last. With nothing flagged there's nowhere to go, so both are disabled. (Making the row current also selects it, collapsing any multi-selection to that row.)
 - **`{n} selected`** + **▲ Move up** / **▼ Move down** — the Move buttons act on all selected rows as a group, maintaining relative order within the group; selection follows the moved rows. The count before them says how many rows a click is about to move. It's the compact form of the status bar's "file(s) selected" because the toolbar is nearly full. Set from `_refresh_status`; reads `0 selected` before a folder has loaded and at the start of a load. Up comes before Down.
