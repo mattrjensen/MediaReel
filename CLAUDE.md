@@ -455,18 +455,19 @@ Left to right (separators between the groups). **Every control is always on the
 toolbar; the ones that act on loaded files are just greyed out until there's
 something for them to act on** — no folder yet, nothing flagged, nothing
 selected — rather than appearing and disappearing, which would shift the rest
-of the row around. On first launch that means Expand View, Prev, Next, Move
-up, Move down and Rename files are all visible but disabled; only Open folder
-is live.
+of the row around. On first launch that means Reload, Expand View, Prev,
+Next, Move up, Move down and Rename files are all visible but disabled; only
+Open folder is live.
 
 - **Open folder** — opens file picker, loads folder, shows spinner overlay while metadata reads
+- **Reload this folder** — icon-only, next to Open folder: a clockwise circular-arrow icon (`_refresh_icon()`), drawn with `QPainter` like the calendar/trash icons rather than a Unicode glyph such as `↻` — one was tried and rendered as a missing-glyph box on a real machine, exactly the failure those other icons were already built to avoid. Built with an explicit `QIcon.Disabled` pixmap in `#9CA3AF` (the same grey `_btn_style()`'s disabled text uses), not left to Qt's own graying, which barely dimmed it. Re-runs `load_folder()` on whatever folder path `_open_folder` last recorded (`MainWindow._current_folder`), so new files on disk show up and ones removed outside the app disappear. Discards every bit of in-memory staging (moves, manual dates/filenames, selection) exactly the way opening a *different* folder already does, silently — no confirmation, for the same reason. Disabled alongside Expand View until a folder with at least one file is loaded.
 - **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Disabled until a folder with at least one file is loaded (`_refresh_status` / `_on_load_started`). Double-clicking a thumbnail (either mode) opens the full-screen preview — see "Full-screen preview".
 - **`⚠ {n} file(s) need ordering`** + **Prev** / **Next** — a status *label* (deliberately not a button, so no border/background) with two buttons beside it. The label is amber with a ⚠ while any file has `needs_attention=True`, and plain grey `0 file(s) need ordering` otherwise — including before a folder is loaded (`_refresh_attention_controls` swaps the style only when that state changes, since `setStyleSheet` is slow-ish). Prev/Next step backward/forward through the flagged files (`MainWindow._step_attention`), scrolling the row to the centre and making it current. They work from the table's *current row* rather than a remembered position in the flagged list — flagged files move and stop being flagged as you work on them, which would leave a stored position pointing at the wrong file. They **don't wrap**: past the last flagged file Next is greyed out, and before the first Prev is (`_attention_target` returns `None` there, and `_refresh_attention_controls` disables the button rather than leaving it to silently do nothing). Because that depends on the current row as well as the flagged set, `_refresh_attention_controls` also runs on the selection model's `currentChanged`, not just from `_refresh_status`. With no current row, both are enabled — Next goes to the first flagged file and Prev to the last. With nothing flagged there's nowhere to go, so both are disabled. (Making the row current also selects it, collapsing any multi-selection to that row.)
 - **`{n} selected`** + **▲ Move up** / **▼ Move down** — the Move buttons act on all selected rows as a group, maintaining relative order within the group; selection follows the moved rows. The count before them says how many rows a click is about to move. It's the compact form of the status bar's "file(s) selected" because the toolbar is nearly full. Set from `_refresh_status`; reads `0 selected` before a folder has loaded and at the start of a load. Up comes before Down.
 - **`{n} file(s) to be renamed.`** — grey text just left of Rename files; empty when nothing's pending. (Also in the status bar, below.)
 - **Rename files** (`✓  Rename files`; was "Apply rename") — enabled as soon as any file has a pending rename. Warns if any files still need attention. Confirms before proceeding.
 
-**Toolbar width:** the toolbar needs ~1180px (the "need ordering" controls are always showing) with typical counts (~1240px with 4-digit counts everywhere). A `QToolBar` that runs out of room doesn't stop the window shrinking — it pushes its *last* items, i.e. Rename files, into a » overflow menu — so the window's minimum width is 1200 (it was 1100 before the Move buttons and selection count joined this row) and the default is 1280. Only a narrow window *and* 4-digit counts in all three texts at once can still overflow.
+**Toolbar width:** the toolbar needs ~1220px (the "need ordering" controls are always showing) with typical counts (~1280px with 4-digit counts everywhere — measured: fits from 1280px, overflows at 1240px and below). A `QToolBar` that runs out of room doesn't stop the window shrinking — it pushes its *last* items, i.e. Rename files, into a » overflow menu — so the window's minimum width is 1200 (it was 1100 before the Move buttons and selection count joined this row, 1200 before the Reload button added ~40px) and the default is 1280. Only a narrow window *and* 4-digit counts in all three texts at once can still overflow — the same accepted edge case as before, just ~40px further out since Reload joined the row; it wasn't considered worth raising the minimum width for.
 
 ### Status bar
 Left to right: `{n} files`, `{y} file(s) to be renamed`, `{z} file(s) need
@@ -977,6 +978,21 @@ reaches its end it rewinds to the start and waits there *paused* (`_on_media_sta
 again — left to itself the video surface goes blank at the end. A file that can't be played shows
 the reason and points at "Open in default app". Moving to another file always
 releases the player first, so one clip's sound never carries on under the next.
+
+**Stepping quickly through several videos before one finishes opening is
+expected** and cancels the still-opening previous source — reproduced by
+calling `PreviewWindow._step()` back-to-back with no event-loop pumping
+between calls, which lands correctly on the final file and plays/shows it
+fine every time. Qt's FFmpeg backend logs the cancelled opens through
+`qt.multimedia.ffmpeg.mediadataholder` as `Could not open media... Immediate
+exit requested` — a real user hit this and (reasonably) read it as something
+breaking. It's silenced in `main()` via
+`QLoggingCategory.setFilterRules('qt.multimedia.ffmpeg.mediadataholder.warning=false')`,
+set before the `QApplication` is constructed. This is a different, unrelated
+reporting path from `QMediaPlayer.errorOccurred`/`_on_player_error` above —
+a genuinely broken file (verified with a truncated `.mp4`, moov atom
+missing) still shows "Can't play this video" correctly with the category
+silenced, since that comes from the player's own signal, not this log line.
 
 `tests/diagnostic_video_playback.py` is the standalone check that Qt can decode
 real clips (H.264, HEVC, MPEG-4, MJPEG, XVID: all passed against the author's

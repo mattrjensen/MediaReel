@@ -9,10 +9,11 @@ from typing import Optional
 
 from PySide6.QtCore import (
     Qt, QSize, QRect, QEvent, QTimer, QRectF, QPointF, QStandardPaths, Signal,
-    QDate, QPersistentModelIndex
+    QDate, QPersistentModelIndex, QLoggingCategory
 )
 from PySide6.QtGui import (
-    QColor, QPainter, QPen, QPixmap, QImage, QPalette, QFontMetrics
+    QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QImage, QPalette,
+    QFontMetrics
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -1008,6 +1009,69 @@ class MediaTableView(QTableView):
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
+def _refresh_icon(size: int = 40) -> QIcon:
+    """A clockwise circular-arrow icon for the toolbar's Reload button,
+    drawn with QPainter rather than a Unicode glyph like ↻ — the same reason
+    the calendar/trash icons are painter-drawn: a glyph is only as good as
+    whatever font is installed, and this one rendered as a missing-glyph box
+    on a real machine. Rendered oversized (`size`) so it stays crisp once
+    QPushButton scales it down to its actual iconSize().
+
+    Built with an explicit QIcon.Disabled pixmap, not left to Qt's automatic
+    graying: that made the icon barely lighter than enabled, out of step
+    with how washed-out this app's disabled *text* buttons are (`_btn_style`'s
+    `QPushButton:disabled { color: #9CA3AF; ... }`) — this uses that same
+    grey so a disabled Reload reads the same as everything else disabled."""
+    icon = QIcon()
+    for mode, color in ((QIcon.Normal, '#374151'), (QIcon.Disabled, '#9CA3AF')):
+        icon.addPixmap(_refresh_pixmap(color, size), mode)
+    return icon
+
+
+def _refresh_pixmap(color: str, size: int) -> QPixmap:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    cx = cy = size / 2
+    r = size * 0.30
+    rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+    # Qt: positive angle = counter-clockwise, negative = clockwise. A 290°
+    # clockwise sweep from the top leaves a ~70° gap near the top-left —
+    # the open-circle look every "refresh" icon shares.
+    start_angle, sweep = 90.0, -290.0
+    path = QPainterPath()
+    path.arcMoveTo(rect, start_angle)
+    path.arcTo(rect, start_angle, sweep)
+    pen = QPen(QColor(color), size * 0.10)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.drawPath(path)
+
+    # Arrowhead at the arc's leading (clockwise) end, pointing the direction
+    # the arc is "travelling" — what makes it read as rotating, not just a
+    # broken ring.
+    end_angle = math.radians(start_angle + sweep)
+    tip_x = cx + r * math.cos(end_angle)
+    tip_y = cy - r * math.sin(end_angle)
+    # Tangent for clockwise travel at this angle (see the derivation in the
+    # commit/CLAUDE.md note next to this function).
+    tangent = (math.sin(end_angle), math.cos(end_angle))
+    perp = (-tangent[1], tangent[0])
+    length, width = size * 0.20, size * 0.20
+    front = QPointF(tip_x + tangent[0] * length * 0.6, tip_y + tangent[1] * length * 0.6)
+    back  = QPointF(tip_x - tangent[0] * length * 0.4, tip_y - tangent[1] * length * 0.4)
+    left  = QPointF(back.x() + perp[0] * width / 2, back.y() + perp[1] * width / 2)
+    right = QPointF(back.x() - perp[0] * width / 2, back.y() - perp[1] * width / 2)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawPolygon([front, left, right])
+
+    painter.end()
+    return pixmap
+
+
 class MainWindow(QMainWindow):
 
     _heif_warned = False  # set once the missing-pillow-heif dialog has been shown
@@ -1026,6 +1090,7 @@ class MainWindow(QMainWindow):
         self._model        = MediaTableModel()
         self._expanded     = False
         self._preview      = None   # the open PreviewWindow, if any
+        self._current_folder = None   # path last passed to load_folder(), for the Reload button
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._on_repeat_tick)
         self._repeat_dir   = 0
@@ -1059,6 +1124,22 @@ class MainWindow(QMainWindow):
         self._btn_open = QPushButton('📁  Open folder')
         self._btn_open.setStyleSheet(self._btn_style())
         toolbar.addWidget(self._btn_open)
+
+        # Icon-only — a plain glyph, like the toolbar's other symbols
+        # (▲ ▼ ‹ › ⊞ ⊟ ✓ ⚠), not a painted icon: this is a toolbar button,
+        # not a table-cell control. Reloads whatever folder is currently
+        # open, discarding all in-memory staging (moves, manual dates/
+        # filenames, selection) the same way opening a *different* folder
+        # already silently does — no confirmation, for the same reason.
+        # Disabled until a folder is loaded, alongside _btn_expand.
+        self._btn_refresh = QPushButton()
+        self._btn_refresh.setIcon(_refresh_icon())
+        self._btn_refresh.setIconSize(QSize(16, 16))
+        self._btn_refresh.setStyleSheet(self._btn_style())
+        self._btn_refresh.setFixedWidth(32)
+        self._btn_refresh.setToolTip('Reload this folder')
+        self._btn_refresh.setEnabled(False)
+        toolbar.addWidget(self._btn_refresh)
         toolbar.addSeparator()
 
         # Everything that acts on loaded files is always on the toolbar and
@@ -1252,6 +1333,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self._btn_open.clicked.connect(self._open_folder)
+        self._btn_refresh.clicked.connect(self._reload_folder)
         self._btn_down.pressed.connect(lambda: self._on_move_pressed(1))
         self._btn_down.released.connect(self._on_move_released)
         self._btn_up.pressed.connect(lambda: self._on_move_pressed(-1))
@@ -1299,7 +1381,17 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.setWindowTitle(f'Media Reel — {Path(folder).name}')
+            self._current_folder = folder
             self._model.load_folder(folder)
+
+    def _reload_folder(self):
+        """Re-reads the current folder from disk — new files show up,
+        deleted-outside-the-app files disappear, and any refreshed metadata
+        (e.g. a file edited elsewhere) is picked up. Everything staged only
+        in memory (moves, manual dates/filenames, selection) is lost, same
+        as switching to a different folder already does without asking."""
+        if self._current_folder:
+            self._model.load_folder(self._current_folder)
 
     def _move(self, direction: int, clicked_row: int = -1):
         # Single choke point for the toolbar buttons, the per-row chevrons
@@ -1540,6 +1632,7 @@ class MainWindow(QMainWindow):
         # keeping the previous folder's selection/ordering counts.
         self._lbl_selected_toolbar.setText('0 selected')
         self._btn_expand.setEnabled(count > 0)
+        self._btn_refresh.setEnabled(count > 0)
         self._btn_apply.setEnabled(False)
         self._btn_up.setEnabled(False)
         self._btn_down.setEnabled(False)
@@ -1656,6 +1749,7 @@ class MainWindow(QMainWindow):
         self._lbl_files.setText(f'{total} files')
         self._btn_apply.setEnabled(self._model.has_pending_renames())
         self._btn_expand.setEnabled(total > 0)   # nothing to expand until a folder's loaded
+        self._btn_refresh.setEnabled(total > 0)  # nothing to reload either
 
         # display_filename, not proposed_filename — see _apply_rename.
         will_rename = sum(
@@ -1734,6 +1828,16 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
+    # Every Left/Right step in the preview (or a plain file switch) calls
+    # QMediaPlayer.setSource() again before a still-opening previous source
+    # has finished — intentional, since the point is to move on immediately
+    # rather than wait. Qt's FFmpeg backend cancels that in-flight open and,
+    # separately from the player's own errorOccurred signal (still reported
+    # normally — see PreviewWindow._on_player_error), logs it through this
+    # category as "Could not open media... Immediate exit requested". It's
+    # expected noise from our own cancellation, not a real failure, so it's
+    # silenced here rather than left to look like something broke.
+    QLoggingCategory.setFilterRules('qt.multimedia.ffmpeg.mediadataholder.warning=false')
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 

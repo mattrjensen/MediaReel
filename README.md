@@ -29,6 +29,7 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **Interpolation** — undated files moved between dated anchors get evenly distributed timestamps
 - **Hold-to-repeat** — hold Move up/down buttons for accelerating repeat, with a speed cap to prevent overshooting
 - **Expand/compact view** — toggle between compact overview and expanded thumbnails for content-based ordering
+- **Reload folder** — an icon-only button next to Open folder re-reads the current folder from disk, picking up new files and dropping ones that were removed outside the app
 - **File size** — a narrow column shows each file's size in MB
 - **Delete a file** — a trash button on each row moves that file to the Recycle Bin after you confirm
 - **Full-screen preview** — double-click a thumbnail for a big view of that photo or video (with playback controls). Left/Right step through the files in your current list order, Delete moves the file to the Recycle Bin, and closing the preview selects that file in the list. There's also an "Open in default app" button
