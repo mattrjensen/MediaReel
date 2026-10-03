@@ -506,7 +506,7 @@ Open folder is live.
 - **Reload this folder** — icon-only, next to Open folder: a clockwise circular-arrow icon (`_refresh_icon()`), drawn with `QPainter` like the calendar/trash icons rather than a Unicode glyph such as `↻` — one was tried and rendered as a missing-glyph box on a real machine, exactly the failure those other icons were already built to avoid. Built with an explicit `QIcon.Disabled` pixmap in `#9CA3AF` (the same grey `_btn_style()`'s disabled text uses), not left to Qt's own graying, which barely dimmed it. Re-runs `load_folder()` on whatever folder path `_open_folder` last recorded (`MainWindow._current_folder`), so new files on disk show up and ones removed outside the app disappear. Discards every bit of in-memory staging (moves, manual dates/filenames, selection) exactly the way opening a *different* folder already does, silently — no confirmation, for the same reason (deliberate: a user may well click Reload specifically to discard staged edits, same as a browser refresh). The one thing it does carry over is scroll position — unlike opening a different folder, it's still the folder you were looking at, so `_reload_folder()` records `verticalScrollBar().value()` into `MainWindow._pending_scroll_restore` before calling `load_folder()`, and `_on_load_complete()` restores it (clamped automatically if the reload left fewer rows) and clears the field. `_open_folder()` never sets that field, so opening a genuinely different folder is unaffected and still starts at the top. Disabled alongside Expand View until a folder with at least one file is loaded.
 - **⊞ Expand View / ⊟ Compact View** — toggles between compact (default, 68px rows, 80x60 thumbnails) and expanded (140px rows, 160x120 thumbnails) row height mode. Useful when nudging undated files into position by image content. Disabled until a folder with at least one file is loaded (`_refresh_status` / `_on_load_started`). Double-clicking a thumbnail (either mode) opens the full-screen preview — see "Full-screen preview".
 - **`⚠ {n} file(s) need ordering`** + **Prev** / **Next** — a status *label* (deliberately not a button, so no border/background) with two buttons beside it. The label is amber with a ⚠ while any file has `needs_attention=True`, and plain grey `0 file(s) need ordering` otherwise — including before a folder is loaded (`_refresh_attention_controls` swaps the style only when that state changes, since `setStyleSheet` is slow-ish). Prev/Next step backward/forward through the flagged files (`MainWindow._step_attention`), scrolling the row to the centre and making it current. They work from the table's *current row* rather than a remembered position in the flagged list — flagged files move and stop being flagged as you work on them, which would leave a stored position pointing at the wrong file. They **don't wrap**: past the last flagged file Next is greyed out, and before the first Prev is (`_attention_target` returns `None` there, and `_refresh_attention_controls` disables the button rather than leaving it to silently do nothing). Because that depends on the current row as well as the flagged set, `_refresh_attention_controls` also runs on the selection model's `currentChanged`, not just from `_refresh_status`. With no current row, both are enabled — Next goes to the first flagged file and Prev to the last. With nothing flagged there's nowhere to go, so both are disabled. (Making the row current also selects it, collapsing any multi-selection to that row.)
-- **`{n} selected`** + **▲ Move up** / **▼ Move down** — the Move buttons act on all selected rows as a group, maintaining relative order within the group; selection follows the moved rows. The count before them says how many rows a click is about to move. It's the compact form of the status bar's "file(s) selected" because the toolbar is nearly full. Set from `_refresh_status`; reads `0 selected` before a folder has loaded and at the start of a load. Up comes before Down.
+- **`{n} selected`** + **▲ Move up** / **▼ Move down** / **Adjust time…** — the Move buttons act on all selected rows as a group, maintaining relative order within the group; selection follows the moved rows. The count before them says how many rows a click is about to move. It's the compact form of the status bar's "file(s) selected" because the toolbar is nearly full. Set from `_refresh_status`; reads `0 selected` before a folder has loaded and at the start of a load. Up comes before Down. Adjust time is the third selection-acting control in this group — see "Batch date/time offset".
 - **`{n} file(s) to be renamed.`** — grey text just left of Rename files; empty when nothing's pending. (Also in the status bar, below.)
 - **Rename files** (`✓  Rename files`; was "Apply rename") — enabled as soon as any file has a pending rename. Warns if any files still need attention. Confirms before proceeding.
 
@@ -862,6 +862,115 @@ It's also relocated to its correct chronological position (`_reposition_by_date`
 below) — the same `set_manual_date` call handles both, since a hard anchor
 wrong enough to need correcting is exactly the file most likely to be
 sitting somewhere badly wrong in the list.
+
+### Batch date/time offset
+**Adjust time…**, in the toolbar's Move group. Enabled in `_refresh_move_buttons`
+whenever ≥1 selected row has a date — not just whenever ≥1 row is selected,
+the way Move is: a selection that's entirely dateless has nothing for an
+offset to apply to, so without this check the button would open a dialog
+whose own Adjust button is already dead (see below), a pointless round trip.
+A selection with at least one dated file alongside dateless ones is still
+enabled — a real "shift this camera's files" selection routinely sweeps up
+a few dateless stragglers alongside the dated majority, and the dialog's own
+summary/warning (next) already surfaces them before anything is applied, so
+forcing the user to hand-exclude them first would undercut the feature's
+convenience for no real benefit. For a batch of
+files from one camera whose clock was wrong — the *relative* timing between
+shots is still correct, only the whole clock needs shifting by one
+consistent amount, as opposed to the calendar picker's per-file *absolute*
+correction.
+
+`MainWindow._adjust_time_offset` resolves the selection to `MediaFile`
+objects up front (`self._model.files()[i] for i in get_selected_indices()`),
+not row numbers — `apply_date_offset()` repositions files as it goes, so a
+row number captured before that would go stale partway through, the same
+reason every other multi-row operation in this app (e.g. `_move`) works
+from objects or re-resolves by identity rather than trusting indices across
+a mutation. Opens `TimeOffsetDialog` with the affected/skipped counts
+(files with no date to shift are skipped, not errors), and applies
+`MediaTableModel.apply_date_offset(files, offset)` if accepted with a
+non-zero offset — a zero offset is a deliberate no-op, not a 0-length shift:
+calling it anyway would still mark every file `date_source='manual'` for a
+date that didn't actually move.
+
+**`MediaTableModel.apply_date_offset(files, offset)`** gives each file with
+a date (`f.date is not None`) *exactly* the same treatment one picked date
+via `set_manual_date` already gets — both now go through a shared
+`_mutate_for_manual_date(f, dt)` helper (the field changes: `date`,
+`date_source='manual'`, clear `user_moved`/`manual_filename`, demote
+`is_already_formatted`, snapshot `manual_date_undo` if not already set).
+A hard anchor already renamed from the same wrong clock is exactly the
+case this feature exists for, so it gets demoted and re-enters Pass 1 as
+correctable too — see "Wrong-metadata hard anchors" above, which applies
+unchanged. Each file's own "x" in the New filename column undoes it
+individually afterward (`undo_manual_date`), same as any other
+manually-dated file; no separate batch-undo was needed.
+
+Processed in **new**-date order, not selection order, each repositioned via
+`_reposition_by_date` (found by identity, not row number, for the same
+reason as above — rows keep moving as each file in the batch is placed).
+A file is only a reliable reference point for files processed after it
+once it's already settled into its own corrected position, which is what
+sorting by new date before the loop guarantees. `recalculate_
+proposed_filenames()` runs once at the end, not once per file — a large
+selection would otherwise pay for a full recalculate N times over.
+Returns `(affected_count, skipped_count)` for the dialog's summary.
+
+**`TimeOffsetDialog`** — a typed, signed amount (Days/Hours/Minutes/
+Seconds, all non-negative `QSpinBox`es) plus one shared Add/Subtract
+direction (`QRadioButton`s), not the calendar picker's click-based style:
+there's no "click a value" metaphor for a delta the way there is for an
+absolute date, and a camera's clock error is naturally thought of as one
+signed number ("2 hours 15 minutes slow"), not four independently-signed
+fields. `offset()` combines them into one `timedelta` (`magnitude if add
+else -magnitude`); Python's `timedelta` normalizes the day/hour/minute/
+second combination on its own, so the fields don't need artificial range
+limits to compose correctly. "Adjust" is disabled when nothing in the
+selection has a date to shift.
+
+**Four real rendering bugs found by rendering the dialog for real** rather
+than trusting the code to look right — screenshots under the app's actual
+`app.setStyle('Fusion')` + custom light `QPalette` (see `main()`), not raw
+Qt defaults, which earlier scratch checks this session had been omitting
+and which matters: a widget rendered under plain system (dark-theme) Qt
+defaults doesn't necessarily show the same thing the real app does once
+`main()`'s styling is applied.
+
+The first three share one cause: on a dark system theme, styling *only
+some* properties of a widget left Qt filling in the rest from the native
+dark style instead of falling back to a sensible default. A `QSpinBox`
+with no explicit `background`/`color` rendered as a black field with white
+text; a `QPushButton` (Cancel) with no explicit `color` rendered with
+invisible white-on-white text — both fixed by spelling out every colour
+explicitly rather than leaving any to inherit. Styling *any* property of a
+`QRadioButton` switches Qt off native indicator rendering for it entirely —
+the "Add"/"Subtract" circles disappeared completely, leaving no way to see
+which direction was selected, fixed by drawing `QRadioButton::indicator`
+explicitly. (`DateTimePickerPopup`'s Cancel button has the same
+missing-`color` gap as this dialog's did; the user has since confirmed in
+real use that it reads fine as-is, so it's left alone.)
+
+The **fourth is a different, unfixable-via-QSS bug**: the spin boxes'
+native up/down buttons rendered as two blank rectangles, no arrow glyph at
+all. The standard fix for an invisible arrow on a styled Qt widget is the
+CSS border-triangle trick (`QSpinBox::up-arrow { width: 0; height: 0;
+border-left/right: transparent; border-bottom: solid <colour>; }`, the same
+pattern that works for `QComboBox`) — tried first, and confirmed broken in
+this specific Qt build via an isolated repro: the zero-size box with
+transparent side borders doesn't produce a triangle here, it produces a
+solid filled rectangle the full size of the button, regardless of what the
+border widths say. Rather than keep fighting the stylesheet engine, the
+native buttons are hidden entirely (`spin.setButtonSymbols(QAbstractSpinBox.
+NoButtons)`) and replaced with `_SpinStepButton` — a small `QToolButton`
+subclass with a `paintEvent` that draws a flat filled triangle via
+`QPainterPath`, wired to `spin.stepUp`/`spin.stepDown`. This is the same
+remedy every other icon in this app already uses (calendar, trash, refresh,
+play/pause, speaker) for exactly the same underlying class of problem —
+Qt/the environment not reliably rendering a shape via glyph or native
+widget trick — and CLAUDE.md's own `_refresh_icon()` entry documents the
+same lesson being learned once already for a Unicode glyph. `AutoRepeat` is
+enabled on `_SpinStepButton` so holding it down repeats, matching what the
+native spin buttons would have done.
 
 ### File size and deleting a file
 

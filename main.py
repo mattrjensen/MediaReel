@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QProgressDialog, QStyledItemDelegate,
     QStyleOptionViewItem, QStyleOptionButton, QProgressBar, QStyle,
     QSizePolicy, QLineEdit, QCalendarWidget, QDialog, QHBoxLayout,
-    QListWidget, QListWidgetItem, QToolTip
+    QListWidget, QListWidgetItem, QToolTip, QRadioButton, QSpinBox,
+    QButtonGroup, QGridLayout, QFrame, QToolButton, QAbstractSpinBox
 )
 
 from media_model import (
@@ -932,6 +933,177 @@ class DateTimePickerPopup(QDialog):
         self._center_selected()   # needs the final size, so after show()
 
 
+class _SpinStepButton(QToolButton):
+    """A single up/down step button for TimeOffsetDialog's spin boxes,
+    QPainter-drawn (flat filled triangle), not QSpinBox's own native
+    up/down buttons. Those render as solid blank rectangles — no arrow
+    shape at all — the moment any QSS touches QSpinBox: the usual
+    CSS border-triangle trick (zero-size box, transparent side borders)
+    is a well-known pattern for QComboBox but this Qt build doesn't honour
+    it for QSpinBox's arrow sub-controls, confirmed by a minimal isolated
+    repro before this class was written. Same root cause as the
+    QRadioButton indicator above (any styling switches off native
+    rendering for unstyled sub-parts) and the same fix as every other
+    icon in this app (calendar, trash, refresh, play/pause): draw it
+    yourself rather than rely on the native control."""
+
+    def __init__(self, up: bool, parent=None):
+        super().__init__(parent)
+        self._up = up
+        self.setFixedSize(16, 11)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAutoRepeat(True)
+        self.setStyleSheet(
+            'QToolButton { background: #F9FAFB; border: none; } '
+            'QToolButton:hover { background: #F3F4F6; } '
+            'QToolButton:pressed { background: #E5E7EB; }')
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor('#374151'))
+        w, h = self.width(), self.height()
+        cx = w / 2
+        path = QPainterPath()
+        if self._up:
+            path.moveTo(cx - 4, h * 0.68)
+            path.lineTo(cx + 4, h * 0.68)
+            path.lineTo(cx, h * 0.28)
+        else:
+            path.moveTo(cx - 4, h * 0.32)
+            path.lineTo(cx + 4, h * 0.32)
+            path.lineTo(cx, h * 0.72)
+        path.closeSubpath()
+        painter.drawPath(path)
+
+
+class TimeOffsetDialog(QDialog):
+    """Shift every selected file with a date by the same signed amount —
+    for a batch of photos/videos from one camera whose clock was wrong, so
+    the files are all off by the same consistent delta. A typed amount
+    (days/hours/minutes/seconds) plus one Add/Subtract direction shared by
+    all of them, not the calendar picker's click-based style: there's no
+    "click a value" metaphor for a delta the way there is for an absolute
+    date, and a camera's clock error is naturally thought of as one number
+    ("2 hours 15 minutes slow"), not a day/hour/min/sec each independently
+    signed."""
+
+    def __init__(self, affected_count: int, skipped_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Adjust Date/Time')
+        # Every colour spelled out explicitly, foreground included — on a
+        # dark system theme, a rule that only set background (or only
+        # border) left QSpinBox and QPushButton falling back to native
+        # dark-theme text/fill for whatever it didn't set, rendering as a
+        # black field or invisible (white-on-white) button text.
+        self.setStyleSheet(
+            'QDialog { background: #FFFFFF; } '
+            'QLabel { color: #111827; background: transparent; } '
+            # Native up/down buttons are hidden (NoButtons, below) and
+            # replaced with _SpinStepButton — see its docstring for why.
+            'QSpinBox { padding: 3px 6px; border: 1px solid #D1D5DB; border-radius: 4px; '
+            'background: #FFFFFF; color: #111827; } '
+            'QRadioButton { color: #111827; background: transparent; } '
+            # Styling *any* QRadioButton property switches Qt off native
+            # indicator rendering for it — without this, the circle
+            # disappeared entirely (just the text, no way to see which
+            # direction was selected), so it has to be drawn explicitly
+            # rather than left to whatever the native style would've done.
+            'QRadioButton::indicator { width: 14px; height: 14px; border-radius: 7px; '
+            'border: 1px solid #9CA3AF; background: #FFFFFF; } '
+            'QRadioButton::indicator:checked { border: 1px solid #2563EB; background: #2563EB; }')
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(12)
+
+        noun = 'file' if affected_count == 1 else 'files'
+        summary = QLabel(f'Shift the date/time of {affected_count} selected {noun} by:')
+        outer.addWidget(summary)
+        if skipped_count:
+            skip_noun = 'file has' if skipped_count == 1 else 'files have'
+            skipped_lbl = QLabel(f'{skipped_count} selected {skip_noun} no date and will be left unchanged.')
+            skipped_lbl.setStyleSheet('color: #B91C1C;')
+            outer.addWidget(skipped_lbl)
+
+        direction = QHBoxLayout()
+        self._add = QRadioButton('Add')
+        self._subtract = QRadioButton('Subtract')
+        self._add.setChecked(True)   # no default direction would be more "correct"
+        # but a radio group needs one selected, and Add is as good a guess as any
+        group = QButtonGroup(self)
+        group.addButton(self._add)
+        group.addButton(self._subtract)
+        direction.addWidget(self._add)
+        direction.addWidget(self._subtract)
+        direction.addStretch(1)
+        outer.addLayout(direction)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        self._fields = {}
+        for col, (label, maximum) in enumerate(
+                (('Days', 3650), ('Hours', 999), ('Minutes', 999), ('Seconds', 999))):
+            lbl = QLabel(label)
+            lbl.setStyleSheet('color: #6B7280; font-size: 11px;')
+            lbl.setAlignment(Qt.AlignCenter)
+            spin = QSpinBox()
+            spin.setRange(0, maximum)
+            spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            spin.setFixedWidth(54)
+            spin.setAlignment(Qt.AlignCenter)
+
+            field = QWidget()
+            field_layout = QHBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(0)
+            field_layout.addWidget(spin)
+            steps = QVBoxLayout()
+            steps.setContentsMargins(0, 0, 0, 0)
+            steps.setSpacing(0)
+            up_btn = _SpinStepButton(True)
+            down_btn = _SpinStepButton(False)
+            up_btn.clicked.connect(spin.stepUp)
+            down_btn.clicked.connect(spin.stepDown)
+            steps.addWidget(up_btn)
+            steps.addWidget(down_btn)
+            field_layout.addLayout(steps)
+
+            grid.addWidget(lbl, 0, col, Qt.AlignCenter)
+            grid.addWidget(field, 1, col, Qt.AlignCenter)
+            self._fields[label.lower()] = spin
+        outer.addLayout(grid)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton('Cancel')
+        cancel.setStyleSheet(
+            'QPushButton { background: #FFFFFF; color: #374151; border: 1px solid #D1D5DB; '
+            'border-radius: 6px; padding: 6px 16px; } '
+            'QPushButton:hover { background: #F3F4F6; }')
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton('Adjust')
+        ok.setStyleSheet(
+            'QPushButton { background: #2563EB; color: #FFFFFF; border: none; '
+            'border-radius: 6px; padding: 6px 16px; font-weight: 600; } '
+            'QPushButton:hover { background: #1D4ED8; } '
+            'QPushButton:disabled { background: #93C5FD; }')
+        ok.setDefault(True)
+        ok.setEnabled(affected_count > 0)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        outer.addLayout(buttons)
+
+    def offset(self) -> timedelta:
+        magnitude = timedelta(
+            days=self._fields['days'].value(), hours=self._fields['hours'].value(),
+            minutes=self._fields['minutes'].value(), seconds=self._fields['seconds'].value())
+        return magnitude if self._add.isChecked() else -magnitude
+
+
 class MediaTableView(QTableView):
     """QTableView that draws a 1px blue border around each selected row
     instead of flooding the row with a highlight fill, and routes clicks
@@ -1358,6 +1530,13 @@ class MainWindow(QMainWindow):
         self._btn_down.setEnabled(False)
         toolbar.addWidget(self._btn_down)
 
+        # Also acts on the selection, same group as Move — for a batch of
+        # files from one camera whose clock was wrong.
+        self._btn_adjust_time = QPushButton('Adjust time…')
+        self._btn_adjust_time.setStyleSheet(self._btn_style())
+        self._btn_adjust_time.setEnabled(False)
+        toolbar.addWidget(self._btn_adjust_time)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
@@ -1506,6 +1685,7 @@ class MainWindow(QMainWindow):
         self._btn_down.released.connect(self._on_move_released)
         self._btn_up.pressed.connect(lambda: self._on_move_pressed(-1))
         self._btn_up.released.connect(self._on_move_released)
+        self._btn_adjust_time.clicked.connect(self._adjust_time_offset)
         self._btn_expand.clicked.connect(self._toggle_expand)
         self._btn_apply.clicked.connect(self._apply_rename)
         self._btn_prev.clicked.connect(lambda: self._step_attention(-1))
@@ -1791,6 +1971,28 @@ class MainWindow(QMainWindow):
         self._repeat_timer.setInterval(interval)
         self._repeat_count += 1
 
+    def _adjust_time_offset(self):
+        """Toolbar's "Adjust time…" — shift every selected file's date by
+        the same amount, for a batch from one camera whose clock was
+        wrong. Files, not row numbers: apply_date_offset() repositions each
+        one as it goes, so a row number taken up front would go stale
+        partway through."""
+        indices = self._model.get_selected_indices()
+        if not indices:
+            return
+        files = [self._model.files()[i] for i in indices]
+        affected = sum(1 for f in files if f.date is not None)
+        dlg = TimeOffsetDialog(affected, len(files) - affected, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        offset = dlg.offset()
+        if offset == timedelta(0):
+            return   # nothing to do — and nothing should be marked "manual"
+                     # for a date that didn't actually change
+        self._model.apply_date_offset(files, offset)
+        self._refresh_status()
+        self._refresh_move_buttons()
+
     def _toggle_expand(self):
         global THUMB_W, THUMB_H, ROW_H
         self._expanded = not self._expanded
@@ -1824,6 +2026,7 @@ class MainWindow(QMainWindow):
         self._btn_apply.setEnabled(False)
         self._btn_up.setEnabled(False)
         self._btn_down.setEnabled(False)
+        self._btn_adjust_time.setEnabled(False)
         self._refresh_attention_controls()
         self._overlay.start()
         self._thumb_pulse_timer.start()
@@ -1971,9 +2174,18 @@ class MainWindow(QMainWindow):
         self._refresh_attention_controls()
 
     def _refresh_move_buttons(self):
-        has_sel = bool(self._model.get_selected_indices())
+        indices = self._model.get_selected_indices()
+        has_sel = bool(indices)
         self._btn_up.setEnabled(has_sel)
         self._btn_down.setEnabled(has_sel)
+        # Not just has_sel: a selection of entirely dateless files has
+        # nothing for an offset to apply to, so the dialog it would open
+        # would already be a dead end (its own Adjust button disabled
+        # before you've touched anything) — catch that here instead of
+        # making the user open it to find out.
+        files = self._model.files()
+        has_dated = any(files[i].date is not None for i in indices)
+        self._btn_adjust_time.setEnabled(has_sel and has_dated)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

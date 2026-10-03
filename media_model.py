@@ -695,7 +695,19 @@ class MediaTableModel(QAbstractTableModel):
         file actually started. See undo_manual_date()."""
         if row < 0 or row >= len(self._files) or dt is None:
             return
-        f = self._files[row]
+        self._mutate_for_manual_date(self._files[row], dt)
+        self._reposition_by_date(row, dt)   # emits its own layoutChanged
+        self.recalculate_proposed_filenames()
+
+    def _mutate_for_manual_date(self, f: MediaFile, dt: datetime):
+        """The per-file field changes set_manual_date() describes above —
+        factored out so apply_date_offset() (below) can apply the same
+        treatment to a whole selection without each file re-triggering its
+        own recalculate_proposed_filenames(). Snapshotting manual_date_undo,
+        clearing user_moved/manual_filename/is_already_formatted: all of it
+        applies equally to one picked date or one of a batch of shifted
+        ones — a file doesn't know which route its new date came from, and
+        shouldn't behave differently either way."""
         if f.manual_date_undo is None:
             f.manual_date_undo = (f.date, f.date_source, f.is_already_formatted)
         f.date                 = dt
@@ -703,8 +715,44 @@ class MediaTableModel(QAbstractTableModel):
         f.user_moved           = False
         f.manual_filename      = None
         f.is_already_formatted = False
-        self._reposition_by_date(row, dt)   # emits its own layoutChanged
-        self.recalculate_proposed_filenames()
+
+    def apply_date_offset(self, files: List[MediaFile], offset: timedelta) -> tuple:
+        """Shift every file in `files` that has a date by the same offset —
+        for a batch of photos from one camera whose clock was wrong, where
+        the *relative* timing between shots is still correct and only the
+        whole clock needs correcting. `files` would typically be the
+        current selection, not row numbers: rows move as each file is
+        repositioned below, so working from the MediaFile objects
+        themselves (found by identity, not row number, same as
+        _reposition_by_date's other callers) sidesteps that entirely.
+
+        Each affected file gets exactly the same treatment a single picked
+        date would (see _mutate_for_manual_date) — including demoting a
+        hard anchor back to a correctable strong anchor, since a hard
+        anchor renamed from the same wrong clock is exactly the case this
+        feature exists for. Its own "x" in the New filename column undoes
+        it individually afterward, same as any other manually-dated file —
+        no separate batch-undo mechanism needed.
+
+        Processed in *new*-date order, not selection order: each file is
+        repositioned among whatever's currently in the list, and earlier
+        files in that order are only reliable reference points for later
+        ones once they've already settled into their own corrected spot.
+        recalculate_proposed_filenames() runs once at the end, not once per
+        file — a large selection would otherwise pay for it N times over.
+
+        Returns (affected_count, skipped_count) — files with no date to
+        shift are skipped, not errors; the caller reports both."""
+        dated = [(f, f.date + offset) for f in files if f.date is not None]
+        skipped = len(files) - len(dated)
+        dated.sort(key=lambda pair: pair[1])
+        for f, new_dt in dated:
+            self._mutate_for_manual_date(f, new_dt)
+            row = next(i for i, mf in enumerate(self._files) if mf is f)
+            self._reposition_by_date(row, new_dt)
+        if dated:
+            self.recalculate_proposed_filenames()
+        return len(dated), skipped
 
     def _reposition_by_date(self, row: int, dt: datetime):
         """Move self._files[row] to sit between the two files whose current
