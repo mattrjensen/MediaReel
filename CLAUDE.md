@@ -1007,7 +1007,7 @@ thumbnail.
 Implementation: `ThumbnailDelegate` detects `QEvent.MouseButtonDblClick` in
 `editorEvent()` and emits `open_file_requested = Signal(str)` (the filepath),
 connected to `MainWindow._open_preview`, which finds the `MediaFile` and shows
-the window with `open_on_screen()` (a modal, frameless `QDialog`, kept in
+the window with `open_on_screen()` (a modal `QDialog`, kept in
 `MainWindow._preview` while it's up). **It fills `screen.availableGeometry()` —
 everything except the taskbar — rather than using `showFullScreen()`.** On
 Windows `showFullScreen()` didn't cover the taskbar, which then sat on top of the
@@ -1016,6 +1016,23 @@ Play button or seek slider at all. It also left a strip of border down the right
 edge. Sizing to the usable area keeps every control on screen wherever the
 taskbar is (or isn't); the cost is that the taskbar stays visible. `self._expanded` only controls thumbnail
 scaling in `paint()`.
+
+**It has a normal title bar**, not `Qt.FramelessWindowHint` — looks and
+behaves like an ordinary window (with its own system menu/close control),
+matching `MainWindow`, rather than a borderless overlay. That costs some
+vertical space the content area used to have, and `open_on_screen()` has to
+account for it: `setGeometry()` positions the window's *content* area, and
+on Windows the title bar is added above it, not below — sizing content to
+the *full* `availableGeometry()` was tried first and pushed the title bar
+itself off the top of the physical screen (verified: `frameGeometry().top()`
+ended up above `screen().geometry().top()`). Frame margins aren't reliably
+known before the window has actually been shown once (a Qt/platform
+limitation, not something settable up front), so `open_on_screen()` shows at
+the naive geometry first, measures the real title-bar height from the
+now-realized `frameGeometry()`, and corrects — shrinking content height by
+that amount and shifting it down, so the *frame* (title bar included) ends
+up matching `availableGeometry()` exactly: nothing above the screen, nothing
+over the taskbar.
 
 **Navigation.** Left / Right (or the Prev / Next buttons) step to the previous
 / next file *in the table's current order* — up / down the list — not the

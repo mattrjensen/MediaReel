@@ -314,8 +314,10 @@ class PreviewWindow(QDialog):
         self._signals.loaded.connect(self._on_image_loaded)
 
         self.setWindowTitle('Preview')
-        # No title bar: the window is laid over the screen by open_on_screen().
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        # A normal title bar (not Qt.FramelessWindowHint) — the taskbar
+        # stays visible below the window already (see open_on_screen), and
+        # the title bar above it keeps this looking and behaving like an
+        # ordinary window, not a borderless overlay, matching MainWindow.
         self.setModal(True)
         self.setAutoFillBackground(True)
         pal = self.palette()
@@ -449,9 +451,28 @@ class PreviewWindow(QDialog):
         the taskbar, which then sat on top of the bottom of the window — right
         where the video controls are — and left a strip of border on the right.
         Sizing to availableGeometry() keeps every control on screen wherever
-        the taskbar is (or isn't)."""
-        self.setGeometry(self.screen().availableGeometry())
+        the taskbar is (or isn't).
+
+        Now that the window has a real title bar again (not frameless), that
+        extra height has to come from somewhere: setGeometry() positions the
+        *content* area, and on Windows the title bar gets added above it, not
+        below — so sizing content to the full availableGeometry() pushed the
+        title bar itself off the top of the physical screen (verified:
+        frameGeometry().top() ended up above screen().geometry().top()).
+        Frame margins aren't reliably known before the window has actually
+        been shown once (a Qt/platform limitation, not something settable up
+        front), so this shows at the naive geometry first, measures the real
+        title-bar height from the now-realized frameGeometry(), and corrects
+        — shrinking content height by that amount and shifting it down, so
+        the *frame* (title bar included) ends up matching availableGeometry()
+        exactly: nothing above the screen, nothing over the taskbar."""
+        avail = self.screen().availableGeometry()
+        self.setGeometry(avail)
         self.show()
+        title_bar_height = self.geometry().top() - self.frameGeometry().top()
+        if title_bar_height > 0:
+            self.setGeometry(avail.x(), avail.y() + title_bar_height,
+                              avail.width(), avail.height() - title_bar_height)
 
     @property
     def current_file(self) -> Optional[MediaFile]:
