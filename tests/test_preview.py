@@ -11,6 +11,8 @@ tests/diagnostic_video_playback.py, which needs real video files.
 from PIL import Image
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from media_model import MediaFile
 from metadata_reader import DATE_SOURCE_FILENAME
@@ -345,3 +347,105 @@ class TestDecodeUsesItsOwnThreadPool:
         assert h.win._stage._image is not None, (
             'decode did not complete promptly — it may be queued behind '
             'the (saturated) global thread pool instead of using its own')
+
+
+class TestFullScreen:
+    """Entered/exited by double-clicking the photo/video itself (not the
+    bars around it), or Esc while full screen (a second Esc, from windowed,
+    still closes the preview as before — untouched here).
+
+    isVisible()/geometry() only reflect reality once a top-level ancestor
+    has actually been shown (see metadata_panel's tests for the same
+    gotcha), so every test here shows the window first."""
+
+    def _shown(self, harness, start='a.jpg'):
+        h = harness(NAMES, start)
+        h.win.resize(800, 600)   # deterministic geometry to hit-test against
+        h.win.show()
+        return h
+
+    def test_double_click_on_the_stage_enters_full_screen(self, harness):
+        h = self._shown(harness)
+        centre = h.win._pages.geometry().center()
+        QTest.mouseDClick(h.win, Qt.LeftButton, Qt.NoModifier, centre)
+        assert h.win.isFullScreen()
+        assert not h.win._top.isVisible()
+
+    def test_double_click_outside_the_stage_does_nothing(self, harness):
+        h = self._shown(harness)
+        QTest.mouseDClick(h.win, Qt.LeftButton, Qt.NoModifier, h.win._top.geometry().center())
+        assert not h.win.isFullScreen()
+
+    def test_double_click_again_exits_full_screen(self, harness):
+        # The bug this guards: showNormal() must run before re-applying
+        # windowed geometry, or isFullScreen() stays stuck True and a
+        # second double-click looks like it does nothing.
+        h = self._shown(harness)
+        h.win._enter_fullscreen()
+        assert h.win.isFullScreen()
+        centre = h.win._pages.geometry().center()
+        QTest.mouseDClick(h.win, Qt.LeftButton, Qt.NoModifier, centre)
+        assert not h.win.isFullScreen()
+        assert h.win._top.isVisible()
+
+    def test_escape_exits_full_screen_without_closing_the_preview(self, harness):
+        h = self._shown(harness)
+        h.win._enter_fullscreen()
+        QTest.keyClick(h.win, Qt.Key_Escape)
+        assert not h.win.isFullScreen()
+        assert h.win.isVisible()
+
+    def test_a_second_escape_from_windowed_closes_the_preview(self, harness):
+        h = self._shown(harness)
+        finished = []
+        h.win.finished.connect(finished.append)
+        QTest.keyClick(h.win, Qt.Key_Escape)
+        assert finished == [0]   # QDialog.reject()
+
+    def test_left_right_and_delete_still_work_while_full_screen(self, harness):
+        h = self._shown(harness, 'b.jpg')
+        h.win._enter_fullscreen()
+        QTest.keyClick(h.win, Qt.Key_Right)
+        assert h.shown == 'c.jpg'
+        assert h.win.isFullScreen()
+        h.win._delete_current()
+        assert h.delete_calls == ['c.jpg']
+        assert h.win.isFullScreen()
+
+    def test_controls_bar_stays_hidden_entering_full_screen_on_a_video(self, harness):
+        # The bug this guards: _refresh_controls_visibility() was called
+        # before showFullScreen() actually changed the window state, so
+        # isFullScreen() was still False at the time it checked — masked
+        # for a photo (is_video=False already hides it) but left the
+        # controls bar showing at the bottom of an otherwise full-screen
+        # video.
+        h = self._shown(harness)
+        h.by_name['a.jpg'].is_video = True
+        h.win._show_file(h.by_name['a.jpg'])
+        assert h.win._controls.isVisible()   # normal, windowed: shown for a video
+        h.win._enter_fullscreen()
+        assert h.win.isFullScreen()
+        assert not h.win._controls.isVisible()
+
+    def test_controls_bar_reappears_for_a_video_after_exiting_full_screen(self, harness):
+        h = self._shown(harness)
+        h.by_name['a.jpg'].is_video = True
+        h.win._show_file(h.by_name['a.jpg'])
+        h.win._enter_fullscreen()
+        h.win._exit_fullscreen()
+        assert not h.win.isFullScreen()
+        assert h.win._controls.isVisible()
+
+    def test_metadata_panel_is_hidden_entering_full_screen(self, harness):
+        h = self._shown(harness)
+        h.win._metadata_panel.setVisible(True)
+        h.win._enter_fullscreen()
+        assert not h.win._metadata_panel.isVisible()
+
+    def test_stepping_to_another_file_while_full_screen_stays_full_screen(self, harness):
+        h = self._shown(harness)
+        h.win._enter_fullscreen()
+        h.win._step(1)
+        assert h.shown == 'b.jpg'
+        assert h.win.isFullScreen()
+        assert not h.win._top.isVisible()

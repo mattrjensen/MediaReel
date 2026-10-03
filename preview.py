@@ -509,8 +509,67 @@ class PreviewWindow(QDialog):
         elif key == Qt.Key_Space:
             if self._file is not None and self._file.is_video:
                 self._toggle_play()
+        elif key == Qt.Key_Escape and self.isFullScreen():
+            self._exit_fullscreen()   # back to windowed preview, not all the way out
         else:
-            super().keyPressEvent(event)   # Esc closes
+            super().keyPressEvent(event)   # Esc closes (when not full screen)
+
+    def mouseDoubleClickEvent(self, event):
+        # Only over the photo/video itself — not the top/bottom bars or the
+        # metadata panel, which sit outside _pages' own geometry.
+        if self._pages.geometry().contains(event.position().toPoint()):
+            self._toggle_fullscreen()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    # ── full screen ──────────────────────────────────────────────────────────
+    # A second, immersive mode on top of the normal (windowed, title-barred)
+    # preview: just the photo/video, edge to edge, covering the whole screen
+    # including the taskbar — operated by keyboard only (Left/Right/Delete
+    # already work; Space still plays/pauses a video), since there's no
+    # toolbar left to click. Entered/exited by double-clicking the photo/
+    # video, or exited with Esc (a second Esc, from windowed, still closes
+    # the preview as before).
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self._exit_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self):
+        self._top.setVisible(False)
+        self._metadata_panel.setVisible(False)   # keyboard-only here — no Metadata button left to close it
+        self.showFullScreen()
+        # After, not before: _refresh_controls_visibility() reads
+        # isFullScreen(), which is still False until showFullScreen() has
+        # actually run — calling it first only ever "worked" for a photo,
+        # where is_video=False hides the controls bar either way; on a
+        # video it left the controls bar sitting at the bottom of an
+        # otherwise-full-screen window (caught via real geometry/visibility
+        # checks, not by eye).
+        self._refresh_controls_visibility()
+
+    def _exit_fullscreen(self):
+        # showNormal() first: setGeometry() alone repositions the window but
+        # doesn't clear Qt's internal "full screen" window state, so without
+        # this the window stayed stuck full screen — isFullScreen() kept
+        # returning True, and the subsequent setGeometry() calls inside
+        # open_on_screen() only partially applied, fighting the still-active
+        # full-screen state (caught via real geometry checks, not just by
+        # eye — a second double-click to toggle back out of full screen
+        # looked like it did nothing).
+        self.showNormal()
+        self.open_on_screen()   # windowed again: taskbar-safe, title-bar-corrected geometry
+        self._top.setVisible(True)
+        self._refresh_controls_visibility()
+        # Deliberately not reopening the metadata panel even if it was open
+        # before — Metadata is right there on the (now visible again) top
+        # bar to bring it back.
+
+    def _refresh_controls_visibility(self):
+        self._controls.setVisible(
+            not self.isFullScreen() and self._file is not None and self._file.is_video)
 
     # ── showing a file ───────────────────────────────────────────────────────
 
@@ -520,14 +579,13 @@ class PreviewWindow(QDialog):
         self._refresh_info()
         if f.is_video:
             self._pages.setCurrentWidget(self._video)
-            self._controls.setVisible(True)
             self._slider.setValue(0)
             self._player.setSource(QUrl.fromLocalFile(f.filepath))
             self._player.play()
         else:
             self._pages.setCurrentWidget(self._stage)
-            self._controls.setVisible(False)
             self._show_photo(f.filepath)
+        self._refresh_controls_visibility()
         self._prefetch_neighbours()
         if self._metadata_panel.isVisible():
             self._metadata_panel.show_file(f.filepath, f.filename)

@@ -1034,6 +1034,40 @@ that amount and shifting it down, so the *frame* (title bar included) ends
 up matching `availableGeometry()` exactly: nothing above the screen, nothing
 over the taskbar.
 
+**A second, immersive full-screen mode sits on top of this windowed one.**
+Double-clicking the photo/video itself (not the top/bottom bars, not the
+metadata panel) toggles it — `PreviewWindow.mouseDoubleClickEvent` checks
+the click against `self._pages.geometry()`, which only covers the actual
+photo/video area. Entering it hides `_top`, `_controls` and
+`_metadata_panel` and calls `showFullScreen()` — genuinely full screen,
+covering the taskbar too, since with the bars gone there's no video
+controls bar left to be hidden under it (the problem `availableGeometry()`
+sizing exists to avoid for the windowed mode). From there it's **keyboard
+only**: Left/Right/Delete/Space all already work unchanged (they're in
+`keyPressEvent` regardless of window state), and Esc exits back to the
+*windowed* preview rather than closing it outright — a second Esc, now from
+windowed, closes it as before. Double-clicking the photo/video again also
+exits, the same gesture reversed. The metadata panel, if it was open, is
+not reopened on exit — Metadata is right there on the now-visible top bar.
+
+Two bugs surfaced building this, both now covered by
+`tests/test_preview.py::TestFullScreen`:
+- **Exiting via a second double-click looked like it did nothing.**
+  `_exit_fullscreen()` originally just repositioned the window
+  (`open_on_screen()`'s `setGeometry()` calls); that only *moves* a window,
+  it doesn't clear Qt's internal full-screen window state, so
+  `isFullScreen()` stayed `True` and the next toggle's geometry fight
+  with the still-active full-screen state produced visibly wrong results.
+  Fixed by calling `self.showNormal()` first.
+- **The controls bar stayed visible at the bottom of an otherwise
+  full-screen video.** `_enter_fullscreen()` called
+  `_refresh_controls_visibility()` (which reads `isFullScreen()`) *before*
+  `showFullScreen()` had actually changed the window state — so the check
+  ran against the still-`False` old state. This was invisible for a photo
+  (`is_video=False` already hides the bar regardless of that term), which
+  is exactly why it shipped — only a video exposed it. Fixed by swapping
+  the call order.
+
 **Navigation.** Left / Right (or the Prev / Next buttons) step to the previous
 / next file *in the table's current order* — up / down the list — not the
 folder's order, so it follows any moves the user has made. Like the toolbar's
