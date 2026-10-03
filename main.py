@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QSize, QRect, QEvent, QTimer, QRectF, QPointF, QStandardPaths, Signal,
-    QDate, QPersistentModelIndex, QLoggingCategory
+    Qt, QDir, QSize, QRect, QEvent, QTimer, QRectF, QPointF, QStandardPaths,
+    Signal, QDate, QPersistentModelIndex, QLoggingCategory
 )
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QImage,
@@ -1549,7 +1549,11 @@ class MainWindow(QMainWindow):
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
         if folder:
-            self.setWindowTitle(f'Media Reel — {folder}')
+            # QFileDialog hands back Qt-style forward slashes even on
+            # Windows; toNativeSeparators() is just for the title text —
+            # self._current_folder (used for Path()/load_folder() below)
+            # is left as Qt gave it, since forward slashes work fine there.
+            self.setWindowTitle(f'Media Reel — {QDir.toNativeSeparators(folder)}')
             self._current_folder = folder
             self._model.load_folder(folder)
 
