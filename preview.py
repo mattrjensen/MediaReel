@@ -22,7 +22,9 @@ from typing import Callable, Optional
 from PySide6.QtCore import (
     QObject, QPointF, QRect, QRectF, QRunnable, QSize, QThreadPool, QUrl, Qt, Signal,
 )
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor, QIcon, QImage, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -204,6 +206,43 @@ def _draw_pause_bars(painter: QPainter, size: int, color: str):
         painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), radius, radius)
 
 
+def _draw_speaker(painter: QPainter, size: int, color: str, muted: bool = False):
+    """Speaker icon for the preview's Mute button: outward sound-wave arcs
+    when unmuted, a cross when muted — used instead of relying on button
+    text ("Mute"/"Unmute")."""
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    bx0, bx1 = size * 0.08, size * 0.32          # speaker body: back box...
+    by0, by1 = size * 0.38, size * 0.62          # ...widening into the cone
+    cx, cy0, cy1 = size * 0.56, size * 0.20, size * 0.80   # cone's apex
+    painter.drawPolygon([
+        QPointF(cx, cy0), QPointF(bx1, by0), QPointF(bx0, by0),
+        QPointF(bx0, by1), QPointF(bx1, by1), QPointF(cx, cy1),
+    ])
+
+    pen = QPen(QColor(color), size * 0.07)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    cy, wx = size / 2, cx + size * 0.05   # just past the cone's tip
+    if muted:
+        d = size * 0.12
+        painter.drawLine(QPointF(wx, cy - d), QPointF(wx + 2 * d, cy + d))
+        painter.drawLine(QPointF(wx, cy + d), QPointF(wx + 2 * d, cy - d))
+    else:
+        for r in (size * 0.11, size * 0.19):   # two concentric "sound wave" arcs
+            rect = QRectF(wx - r, cy - r, 2 * r, 2 * r)
+            path = QPainterPath()
+            path.arcMoveTo(rect, -45)
+            path.arcTo(rect, -45, 90)
+            painter.drawPath(path)
+
+
+def _draw_speaker_muted(painter: QPainter, size: int, color: str):
+    _draw_speaker(painter, size, color, muted=True)
+
+
 def _draw_trash(painter: QPainter, size: int, color: str):
     """The row Delete button's trash can (DeleteDelegate, main.py), redrawn at
     icon scale — same shape and relative proportions, just resized to fit
@@ -353,8 +392,15 @@ class PreviewWindow(QDialog):
         self._slider = _SeekSlider(Qt.Horizontal)
         self._slider.setFocusPolicy(Qt.NoFocus)
         self._lbl_time = QLabel('0:00 / 0:00')
-        self._btn_mute = _button('Mute', self._toggle_mute)
-        self._btn_mute.setMinimumWidth(80)
+        # Same icon-only treatment as Play/Pause — a crossed-out speaker
+        # reads as "muted" without needing the word.
+        self._icon_speaker       = _icon(_draw_speaker, '#F9FAFB')
+        self._icon_speaker_muted = _icon(_draw_speaker_muted, '#F9FAFB')
+        self._btn_mute = _button('', self._toggle_mute)
+        self._btn_mute.setIcon(self._icon_speaker)
+        self._btn_mute.setIconSize(QSize(17, 17))
+        self._btn_mute.setToolTip('Mute')
+        self._btn_mute.setMinimumWidth(48)
         ctl.addWidget(self._btn_play)
         ctl.addWidget(self._slider, 1)
         ctl.addWidget(self._lbl_time)
@@ -532,7 +578,8 @@ class PreviewWindow(QDialog):
     def _toggle_mute(self):
         muted = not self._audio.isMuted()
         self._audio.setMuted(muted)
-        self._btn_mute.setText('Unmute' if muted else 'Mute')
+        self._btn_mute.setIcon(self._icon_speaker_muted if muted else self._icon_speaker)
+        self._btn_mute.setToolTip('Unmute' if muted else 'Mute')
 
     def _on_position(self, ms: int):
         if not self._slider.isSliderDown():

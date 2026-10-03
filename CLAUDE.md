@@ -983,7 +983,11 @@ shows "Can't display this file".
 **Video** plays through `QMediaPlayer` + `QAudioOutput` + `QVideoWidget`, and
 starts playing when it's shown. The bottom bar (hidden for photos) has
 Play/Pause, a seek slider (a click jumps to that point), `m:ss / m:ss`, and
-Mute (which persists across files). Space toggles play/pause. When a clip
+Mute (which persists across files). Play/Pause and Mute are icon-only —
+a triangle/two bars, and a speaker that gains a cross when muted
+(`_draw_play_triangle`/`_draw_pause_bars`/`_draw_speaker`/`_draw_speaker_muted`),
+the same `QPainter`-drawn treatment as the trash and refresh icons, with a
+tooltip ("Play"/"Pause", "Mute"/"Unmute") standing in for the label. Space toggles play/pause. When a clip
 reaches its end it rewinds to the start and waits there *paused* (`_on_media_status`:
 `setPosition(0)` + `pause()`), so the first frame is showing and Play watches it
 again — left to itself the video surface goes blank at the end. A file that can't be played shows
