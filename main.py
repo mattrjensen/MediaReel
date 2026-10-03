@@ -541,14 +541,58 @@ class _SizeDelegate(_RowTextDelegate):
 # the row selection.
 class MetadataDelegate(BaseDelegate):
 
-    BTN_W = 28
-    BTN_H = 24
+    BTN_W    = 28
+    BTN_H    = 24
+    LOC_SIZE = 16   # the location pin, right half of the cell
 
     def _button_rect(self, option) -> QRect:
+        """The info-circle icon's rect — the left half of the cell, so
+        _location_icon_rect (right half) can't overlap it. Also the click/
+        hit-test area: the location icon isn't clickable, just hovered."""
         r = option.rect
-        return QRect(r.x() + (r.width() - self.BTN_W) // 2,
+        half = r.width() // 2
+        return QRect(r.x() + (half - self.BTN_W) // 2,
                      r.y() + (r.height() - self.BTN_H) // 2,
                      self.BTN_W, self.BTN_H)
+
+    def _location_icon_rect(self, option) -> QRect:
+        r = option.rect
+        half = r.width() // 2
+        size = self.LOC_SIZE
+        return QRect(r.x() + half + (half - size) // 2,
+                     r.y() + (r.height() - size) // 2,
+                     size, size)
+
+    def _draw_location_pin(self, painter: QPainter, rect: QRect, color: QColor):
+        """A map-pin silhouette (circle + a triangular point below it,
+        overlapping so there's no seam) — drawn with primitives, like every
+        other icon in this app, rather than a Unicode/emoji glyph."""
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        # The "head" sits in the top ~2/3 of the icon, leaving the bottom
+        # third for the point to clearly stick out below it — the first
+        # version sized the head so large the point's tip never actually
+        # reached past the head's own bottom edge, so it just read as a
+        # plain circle (caught by zooming into a real render, not by eye
+        # on the small painted version).
+        cx = rect.center().x()
+        r = rect.width() * 0.3
+        head_cy = rect.top() + r + 1
+        path = QPainterPath()
+        path.addEllipse(QPointF(cx, head_cy), r, r)
+        path.moveTo(cx - r * 0.9, head_cy)
+        path.lineTo(cx + r * 0.9, head_cy)
+        path.lineTo(cx, rect.bottom() - 0.5)
+        path.closeSubpath()
+        # Default OddEvenFill XORs the circle and triangle wherever they
+        # overlap — instead of merging into one silhouette it punched a
+        # notch out at the join (looked like a bite taken out of a ball,
+        # not a pin). WindingFill unions them, as intended.
+        path.setFillRule(Qt.WindingFill)
+        painter.drawPath(path)
+        painter.restore()
 
     def paint(self, painter: QPainter, option, index):
         f: MediaFile = index.data(MediaFileRole)
@@ -569,6 +613,13 @@ class MetadataDelegate(BaseDelegate):
         painter.setBrush(QColor('#6B7280'))
         painter.drawEllipse(QPointF(cx, cy - 3.3), 1.2, 1.2)              # dot
         painter.drawRoundedRect(QRectF(cx - 1, cy - 1, 2, 4.5), 1, 1)     # stem
+
+        # Location pin — purely informational (hover for coordinates, see
+        # MediaTableView.viewportEvent); no click action, unlike the info
+        # icon beside it.
+        if f.latitude is not None:
+            self._draw_location_pin(painter, self._location_icon_rect(option), QColor('#2563EB'))
+
         painter.restore()
 
 
@@ -1059,6 +1110,16 @@ class MediaTableView(QTableView):
                     if delegate._reset_icon_rect(opt).contains(pos):
                         QToolTip.showText(event.globalPos(), 'Reset', self)
                         return True
+            if index.isValid() and model is not None and index.column() == COL_METADATA:
+                f: MediaFile = index.data(MediaFileRole)
+                if f is not None and f.latitude is not None:
+                    delegate = self.itemDelegateForColumn(COL_METADATA)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    if delegate._location_icon_rect(opt).contains(pos):
+                        QToolTip.showText(
+                            event.globalPos(), _format_coordinates(f.latitude, f.longitude), self)
+                        return True
             if index.isValid() and model is not None and index.column() == COL_DATE:
                 f: MediaFile = index.data(MediaFileRole)
                 if f is not None and f.looks_like_uuid:
@@ -1099,6 +1160,15 @@ class MediaTableView(QTableView):
             row_rect = left.united(right).adjusted(0, 0, -1, -1)
             painter.drawRect(row_rect)
         painter.end()
+
+
+def _format_coordinates(lat: float, lon: float) -> str:
+    """'38.342577° S, 144.307179° E' — decimal degrees (what exiftool's
+    Composite:GPS* tags already give us, no DMS conversion needed) with a
+    compass letter instead of a bare sign, for the location icon's tooltip."""
+    lat_dir = 'S' if lat < 0 else 'N'
+    lon_dir = 'W' if lon < 0 else 'E'
+    return f'{abs(lat):.6f}° {lat_dir}, {abs(lon):.6f}° {lon_dir}'
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -1371,7 +1441,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(COL_CHECK,    32)
         self._table.setColumnWidth(COL_ORDER,    44)
         self._table.setColumnWidth(COL_FILENAME, 240)
-        self._table.setColumnWidth(COL_METADATA, 40)
+        self._table.setColumnWidth(COL_METADATA, 64)   # info icon + location pin side by side
         self._table.setColumnWidth(COL_DATE,     170)
         self._table.setColumnWidth(COL_SIZE,     84)    # "1234.5 MB" plus padding
         self._table.setColumnWidth(COL_THUMB,    THUMB_W + 16)

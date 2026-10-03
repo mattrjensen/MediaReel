@@ -199,6 +199,10 @@ looks_like_uuid: bool          # original filename (checked against the stripped
                                # so this survives a rename) is a bare UUID — advisory
                                # warning badge only, no effect on rename logic. See
                                # "Date taken column — source badge".
+latitude: float | None         # GPS location in decimal degrees, from the same
+longitude: float | None        # metadata read as the date; None/None if the file has
+                               # no GPS tags. Informational only — the Info column's
+                               # location icon and its tooltip. See "Location icon".
 selected: bool                 # checkbox state
 manual_filename: str | None    # user override from the editable New filename
                                # field. None = use proposed_filename; '' = skip
@@ -477,7 +481,7 @@ into account at all; the only per-row distinction left is `needs_attention`.
 | 0 | Checkbox | Selection |
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
-| 3 | Info | An info-circle button that opens the file's full raw metadata. See "Viewing a file's full metadata". |
+| 3 | Info | An info-circle button that opens the file's full raw metadata, and, when the file has GPS data, a blue location-pin icon beside it (hover for coordinates). See "Viewing a file's full metadata" and "Location icon". |
 | 4 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
 | 5 | Size | Size in MB to one decimal place (`format_file_size`), right-aligned in a narrow column. A small non-empty file reads `<0.1 MB` rather than a misleading `0.0 MB`; blank until read. See "File size and deleting a file". |
 | 6 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on unmoved hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
@@ -994,6 +998,48 @@ page is current, so this can't happen — the same reason `preview.py`'s
 top-aligned (`Qt.AlignLeft | Qt.AlignTop`): a `QLabel` vertically centres by
 default, which read fine in a small box but stranded the text again once
 the status page was sized to fill the same large area the table occupies.
+
+### Location icon
+A blue map-pin icon (`MetadataDelegate._draw_location_pin`, painter-drawn
+like every other icon in this app, not a Unicode/emoji glyph), shown in the
+Info column right after the info-circle icon, when a file has GPS data
+(`MediaFile.latitude`/`longitude` are not `None`). Hover shows the actual
+coordinates, e.g. `38.342577° S, 144.307189° E` (`_format_coordinates`,
+decimal degrees — exiftool's `Composite:GPS*` tags already give decimal, no
+DMS conversion needed). Purely informational, same as the UUID warning
+badge next to it conceptually but with no warning attached — it's a nice-
+to-know, not a flag that something might be wrong.
+
+**Data source, and why it costs nothing extra:**
+`read_metadata()`/`read_metadata_batch()` already fetch every tag exiftool
+has for each file to pull the date out of it (`_date_from_tags`) — this
+reads the same already-fetched `tags` dict for `Composite:GPSLatitude`/
+`Composite:GPSLongitude` (`_location_from_tags`), one more dictionary
+lookup, no extra exiftool calls, no load-time cost. `Composite:GPS*` is
+exiftool's own already-signed, already-decimal value, computed the same way
+regardless of where the file actually stores it (EXIF GPS on photos,
+QuickTime GPS on videos) — confirmed against the author's library: 212 of
+1720 photos scanned had it, and so did video — so one check covers both
+file types. Falls back to the unsigned `EXIF:`/`GPS:GPSLatitude` +
+`GPSLatitudeRef` ('S'/'W' negative) for the rare case exiftool didn't
+compute the Composite tag.
+
+**Layout:** the Info column is 64px — wide enough for the info-circle
+button (left half) and the location pin (right half) side by side, each
+centred in its half (`MetadataDelegate._button_rect`/`_location_icon_rect`).
+The location pin isn't clickable, only hovered — unlike the info icon
+beside it, which opens the metadata dialog.
+
+**A real bug, caught by zooming into a real render, not by eye on the
+painted icon itself:** the pin is built from a circle (the "head") plus a
+triangular point, meant to overlap so they read as one silhouette. The
+first version's point never actually extended past the circle's own bottom
+edge — it rendered as a plain circle with no visible point at all. Fixing
+the proportions (a smaller head sized to leave the bottom third of the
+icon for the point) surfaced a second bug: `QPainterPath`'s default
+`OddEvenFill` XORs overlapping subpaths, so the circle/triangle overlap was
+punching a notch out of the shape instead of merging into one — fixed with
+`path.setFillRule(Qt.WindingFill)`, which unions them as intended.
 
 ### Hold to repeat — Move up/down buttons
 When the Move up/down toolbar buttons are held down, the move action repeats

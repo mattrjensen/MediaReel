@@ -199,3 +199,42 @@ class TestIsUuidFilename:
         from metadata_reader import _new_result
         r = _new_result('/no/such/dir/20241215_184705_5c4ec94a-0ccb-465f-bb89-99dde3e458a7.mp4')
         assert r['looks_like_uuid'] is True
+
+
+class TestLocationFromTags:
+    def test_uses_the_composite_tag_already_signed(self):
+        from metadata_reader import _location_from_tags
+        tags = {'Composite:GPSLatitude': -38.3425767, 'Composite:GPSLongitude': 144.3071788}
+        assert _location_from_tags(tags) == (-38.3425767, 144.3071788)
+
+    def test_no_gps_tags_is_none_none(self):
+        from metadata_reader import _location_from_tags
+        assert _location_from_tags({'EXIF:Make': 'Canon'}) == (None, None)
+
+    def test_falls_back_to_unsigned_exif_tags_with_ref_applied(self):
+        from metadata_reader import _location_from_tags
+        tags = {
+            'GPS:GPSLatitude': 38.3425767, 'GPS:GPSLatitudeRef': 'S',
+            'GPS:GPSLongitude': 144.3071788, 'GPS:GPSLongitudeRef': 'E',
+        }
+        assert _location_from_tags(tags) == (-38.3425767, 144.3071788)
+
+    def test_north_and_east_stay_positive(self):
+        from metadata_reader import _location_from_tags
+        tags = {
+            'GPS:GPSLatitude': 51.5, 'GPS:GPSLatitudeRef': 'N',
+            'GPS:GPSLongitude': 0.1, 'GPS:GPSLongitudeRef': 'E',
+        }
+        assert _location_from_tags(tags) == (51.5, 0.1)
+
+    def test_garbage_values_do_not_raise(self):
+        from metadata_reader import _location_from_tags
+        assert _location_from_tags({'Composite:GPSLatitude': 'n/a',
+                                     'Composite:GPSLongitude': 144.0}) == (None, None)
+
+
+class TestReadAllMetadataIncludesLocation:
+    def test_new_result_defaults_to_none(self):
+        from metadata_reader import _new_result
+        r = _new_result('/no/such/dir/a.jpg')
+        assert r['latitude'] is None and r['longitude'] is None

@@ -155,6 +155,11 @@ def _new_result(filepath: str) -> dict:
         # that survives the rename, not just a property of today's on-disk
         # name. See UUID_FILENAME.
         'looks_like_uuid': is_uuid_filename(Path(stripped_filename).stem),
+        # Filled in once exiftool's tags are available (read_metadata() /
+        # read_metadata_batch()) — unlike looks_like_uuid, this needs the
+        # actual tags, not just the filename.
+        'latitude': None,
+        'longitude': None,
         # Read here, on the worker thread, rather than when the stub rows are
         # created: a stat per file on the main thread would delay the table
         # appearing on a big or slow (network) folder.
@@ -172,6 +177,34 @@ def _date_from_tags(tags: dict) -> Optional[datetime]:
             except ValueError:
                 continue
     return None
+
+
+def _signed_coordinate(value, ref) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return -abs(v) if ref in ('S', 'W') else v
+
+
+def _location_from_tags(tags: dict) -> tuple:
+    """(latitude, longitude) in decimal degrees, or (None, None).
+    Composite:GPSLatitude/Longitude is exiftool's own already-signed value,
+    computed the same way regardless of where the file actually stores it
+    (EXIF GPS on photos, QuickTime GPS on videos) — one check covers both.
+    EXIF:/GPS:GPSLatitude is a fallback for the rare case exiftool didn't
+    compute the Composite tag; those are unsigned and need the matching
+    *Ref ('S'/'W' negative) tag applied by hand."""
+    lat, lon = tags.get('Composite:GPSLatitude'), tags.get('Composite:GPSLongitude')
+    if lat is None or lon is None:
+        lat = _signed_coordinate(tags.get('GPS:GPSLatitude'), tags.get('GPS:GPSLatitudeRef'))
+        lon = _signed_coordinate(tags.get('GPS:GPSLongitude'), tags.get('GPS:GPSLongitudeRef'))
+    try:
+        return (float(lat), float(lon)) if lat is not None and lon is not None else (None, None)
+    except (TypeError, ValueError):
+        return None, None
 
 
 def _fallback_date(filepath: str, filename: str):
@@ -218,6 +251,7 @@ def read_metadata(filepath: str) -> dict:
     try:
         with exiftool.ExifToolHelper(executable=str(exiftool_path), encoding=EXIFTOOL_ENCODING) as et:
             tags = et.get_metadata(filepath)[0]
+            result['latitude'], result['longitude'] = _location_from_tags(tags)
             dt = _date_from_tags(tags)
             if dt:
                 result['date'] = dt
@@ -243,7 +277,9 @@ def read_metadata_batch(
 
     Each result dict has the same keys as read_metadata()'s, plus
     'duration_seconds' (None for non-video, or when a chunk falls back to
-    read_metadata() per file).
+    read_metadata() per file). 'latitude'/'longitude' are decimal degrees
+    from the file's GPS tags, or None if it has none — see
+    _location_from_tags.
 
     Chunking is for progress reporting, cancellation, and limiting the
     damage from one bad chunk — not for command-line length, since pyexiftool
@@ -298,6 +334,8 @@ def read_metadata_batch(
                 result['duration_seconds'] = None
 
                 if tags is not None:
+                    result['latitude'], result['longitude'] = _location_from_tags(tags)
+
                     dt = _date_from_tags(tags)
                     if dt:
                         result['date'] = dt

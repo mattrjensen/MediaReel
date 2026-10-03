@@ -145,6 +145,13 @@ class MediaFile:
     # column's warning badge.
     looks_like_uuid: bool = False
 
+    # GPS location in decimal degrees, from the same metadata read as the
+    # date — None/None if the file has no GPS tags. Purely informational
+    # (the location icon in the Info column and its tooltip); nothing in
+    # the rename logic reads these.
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
     # False until the thumbnail worker has finished with this file, whether
     # or not it produced an image — lets the UI tell "still loading" (pulsing
     # placeholder) apart from "no thumbnail available" (static placeholder).
@@ -1317,6 +1324,8 @@ class MediaTableModel(QAbstractTableModel):
                 date_source          = meta['date_source'],
                 stripped_filename    = meta['stripped_filename'],
                 looks_like_uuid      = meta.get('looks_like_uuid', False),
+                latitude             = meta.get('latitude'),
+                longitude            = meta.get('longitude'),
                 duration_seconds     = meta.get('duration_seconds'),
                 size_bytes           = meta.get('size_bytes'),
                 # A thumbnail may already have arrived for this row — keep it.
