@@ -1439,7 +1439,7 @@ class MainWindow(QMainWindow):
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
         if folder:
-            self.setWindowTitle(f'Media Reel — {Path(folder).name}')
+            self.setWindowTitle(f'Media Reel — {folder}')
             self._current_folder = folder
             self._model.load_folder(folder)
 
