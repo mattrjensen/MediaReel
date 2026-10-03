@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from media_model import MediaFile, format_file_size
+from metadata_panel import MetadataPanel
 
 # How many decoded photos to keep: the one showing plus its neighbours, and a
 # little slack so a quick back-and-forth doesn't re-decode.
@@ -351,6 +352,8 @@ class PreviewWindow(QDialog):
         text.addWidget(self._lbl_meta)
         top.addLayout(text, 1)
         top.addWidget(_button('Open in default app', self._open_externally))
+        self._btn_metadata = _button('Metadata', self._toggle_metadata_panel)
+        top.addWidget(self._btn_metadata)
         top.addWidget(_separator())
         top.addWidget(self._btn_prev)
         top.addWidget(self._btn_next)
@@ -365,13 +368,26 @@ class PreviewWindow(QDialog):
         top.addWidget(btn_delete)
         top.addWidget(_button('Close', self.reject))
 
-        # Centre: the photo/message view or the video, one at a time.
+        # Centre: a metadata side panel on the left (hidden until the
+        # Metadata button is clicked), and the photo/message view or video
+        # on the right. QHBoxLayout handles the "shrink the photo/video to
+        # make room" on its own — the panel has a fixed width and _pages
+        # has the stretch factor, so showing/hiding the panel just changes
+        # how much width _pages gets, no extra layout code needed.
         self._stage = _StageView()
         self._video = QVideoWidget()
         self._video.setStyleSheet('background: #000000;')
         self._pages = QStackedWidget()
         self._pages.addWidget(self._stage)
         self._pages.addWidget(self._video)
+        self._metadata_panel = MetadataPanel(dark=True)
+        self._metadata_panel.setFixedWidth(380)
+        self._metadata_panel.setVisible(False)
+        centre = QHBoxLayout()
+        centre.setContentsMargins(0, 0, 0, 0)
+        centre.setSpacing(0)
+        centre.addWidget(self._metadata_panel)   # left, so it doesn't sit
+        centre.addWidget(self._pages, 1)          # under the Delete/Close buttons
 
         # Bottom bar: video transport. Hidden for photos.
         self._controls = QWidget()
@@ -410,7 +426,7 @@ class PreviewWindow(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._top)
-        root.addWidget(self._pages, 1)
+        root.addLayout(centre, 1)
         root.addWidget(self._controls)
 
     def _build_player(self):
@@ -492,6 +508,8 @@ class PreviewWindow(QDialog):
             self._controls.setVisible(False)
             self._show_photo(f.filepath)
         self._prefetch_neighbours()
+        if self._metadata_panel.isVisible():
+            self._metadata_panel.show_file(f.filepath, f.filename)
 
     def _refresh_info(self):
         f = self._file
@@ -580,6 +598,12 @@ class PreviewWindow(QDialog):
         self._audio.setMuted(muted)
         self._btn_mute.setIcon(self._icon_speaker_muted if muted else self._icon_speaker)
         self._btn_mute.setToolTip('Unmute' if muted else 'Mute')
+
+    def _toggle_metadata_panel(self):
+        visible = not self._metadata_panel.isVisible()
+        self._metadata_panel.setVisible(visible)
+        if visible and self._file is not None:
+            self._metadata_panel.show_file(self._file.filepath, self._file.filename)
 
     def _on_position(self, ms: int):
         if not self._slider.isSliderDown():

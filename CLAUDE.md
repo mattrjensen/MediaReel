@@ -36,6 +36,7 @@ MediaReel/
     media_model.py        ← done
     main.py               ← done
     preview.py            ← full-screen preview window (photos + video)
+    metadata_panel.py     ← full raw-metadata view (table's Info button + preview's Metadata panel)
     tests/                ← pytest tests (test_*.py) + standalone diagnostic_*.py scripts
     assets/               ← icons and images
     requirements.txt      ← pinned runtime dependencies (incl. pillow-heif)
@@ -450,12 +451,13 @@ into account at all; the only per-row distinction left is `needs_attention`.
 | 0 | Checkbox | Selection |
 | 1 | # | 1-based row order, always reflects current staged order |
 | 2 | Filename | Original filename on disk |
-| 3 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
-| 4 | Size | Size in MB to one decimal place (`format_file_size`), right-aligned in a narrow column. A small non-empty file reads `<0.1 MB` rather than a misleading `0.0 MB`; blank until read. See "File size and deleting a file". |
-| 5 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on unmoved hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
-| 6 | Preview | Thumbnail. Videos show first frame + duration badge. |
-| 7 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
-| 8 | Delete | Trash-can button that deletes that row's file (after a confirmation). See "File size and deleting a file". |
+| 3 | Info | An info-circle button that opens the file's full raw metadata. See "Viewing a file's full metadata". |
+| 4 | Date taken | Source badge (top) + formatted datetime (below), with a calendar icon at the right — on every row, including hard anchors, since a renamed-from-wrong-metadata file needs a way back — that opens a date-and-time picker popup. Nothing else in the cell is clickable for editing. |
+| 5 | Size | Size in MB to one decimal place (`format_file_size`), right-aligned in a narrow column. A small non-empty file reads `<0.1 MB` rather than a misleading `0.0 MB`; blank until read. See "File size and deleting a file". |
+| 6 | New filename (preview) | Grey = no change or placeholder instruction. Amber = will be renamed. Painted as a ~40px input box; a single click anywhere in it starts editing. Empty (no box, no text) on unmoved hard anchors — nothing will change, so there's nothing to show. Shows a clear ("x") whenever the box holds a real name; clicking it always blanks the box, which always means skip this file on Apply. |
+| 7 | Preview | Thumbnail. Videos show first frame + duration badge. |
+| 8 | Move | Up/down chevron buttons — routes through MainWindow._move() via Signal |
+| 9 | Delete | Trash-can button that deletes that row's file (after a confirmation). See "File size and deleting a file". |
 
 ---
 
@@ -877,6 +879,96 @@ and it won't reappear in the table until the folder is reloaded.
 `tests/test_file_size_delete.py` covers this without ever reaching the real
 Recycle Bin (missing files, or `QFile.moveToTrash` patched).
 
+### Viewing a file's full metadata
+Two entry points, sharing one implementation (`metadata_panel.py`) so there's
+one place that reads and displays raw metadata rather than two:
+
+- **The table's Info column** (`COL_METADATA`) — an info-circle icon
+  (`MetadataDelegate`, drawn with `QPainter` primitives like the trash and
+  calendar icons, not the Unicode `ⓘ` character — see Reload's icon for why
+  that risk isn't worth it), painted with no button box around it — a first
+  version drew one (matching `DeleteDelegate`'s button chrome) and it read as
+  visual noise next to the plain "i"; `_button_rect` still defines the
+  click/hit-test area, it's just never painted. Clicking it opens
+  `MetadataDialog`, a modal dialog for that one file. Clicks are routed by
+  `MediaTableView.mousePressEvent` (`metadata_requested = Signal(object)`),
+  the same `_button_rect` hit-test pattern as `COL_DELETE`.
+- **The preview's Metadata button** — next to "Open in default app" (a plain
+  text button, not icon-only — unlike Play/Pause/Mute, there's no
+  obvious-at-a-glance shape for "show metadata"). Toggles `MetadataPanel` as
+  a side panel docked to the **left** of the photo/video (so it doesn't end
+  up sitting underneath the Delete/Close buttons at the top right), inside a
+  `QHBoxLayout` where the panel comes first with a fixed width (380px) and
+  the photo/video stack has the stretch factor — showing or hiding the panel
+  just changes how much width the stack gets, no extra layout code needed
+  for the "shrink to make room" behaviour. Stepping to another file while
+  the panel is open (`_show_file`) refreshes it for the new file; closing it
+  again (re-clicking Metadata) is the only way to dismiss it — Esc still
+  closes the whole preview, not just the panel. Constructed with
+  `MetadataPanel(dark=True)` — see "Light/dark theming" below.
+
+**Light/dark theming.** `MetadataPanel` is the one piece of UI shared between
+a light context (the table's dialogs/rows) and a dark one (the preview), so
+it takes a `dark: bool = False` constructor flag rather than hardcoding
+either look. `_PANEL_STYLE_LIGHT` (default, used by `MetadataDialog`) matches
+the table's own palette; `_PANEL_STYLE_DARK` (the preview's panel) reuses
+`preview.py`'s `_BAR_STYLE` palette exactly (`#111827` background, `#F9FAFB`/
+`#9CA3AF` text, `#1F2937` panel chrome, `#374151` borders) rather than
+inventing a third set of colours.
+
+**What it shows**: every tag `exiftool` reports for the file — not just the
+handful (date, duration, size) the rename pipeline keeps — as a two-column
+tag/value table, in exiftool's own order (not re-sorted: it already groups
+related tags sensibly). `metadata_reader.read_all_metadata()` is `et.
+get_metadata(filepath)[0]` with `SourceFile` dropped (redundant — the panel
+already shows the filename), reusing the same `ExifToolHelper`/
+`_vendor_path`/`EXIFTOOL_ENCODING` plumbing as `read_metadata()`.
+
+**Read on demand, not cached at load time.** `read_metadata_batch()` already
+asks exiftool for the full tag set per file and then throws away everything
+except the few tags `_date_from_tags`/`duration_seconds` need — this feature
+exposes what was already being discarded rather than reading anything new in
+bulk. Stashing the full tag dict on every `MediaFile` at load time was
+considered and rejected: real cost (extra memory × up to 2000 files) for a
+feature only a few files per folder will realistically ever have opened, and
+it would show stale data for a file whose metadata changes later (e.g. after
+Apply rewrites it).
+
+**Threading.** A dedicated one-thread `QThreadPool` (`metadata_panel.
+_METADATA_POOL`), not `QThreadPool.globalInstance()` — the same reasoning
+as `preview.py`'s `_PREVIEW_POOL`: the global pool is handed every file in
+the folder for thumbnail generation as soon as it loads, so a read dispatched
+onto it while that's still in progress would queue behind however much of
+that backlog was outstanding, the exact bug `_PREVIEW_POOL` already exists
+to avoid. One thread is enough — this is a single on-demand read per click,
+never a batch. `_MetadataLoader` (`QRunnable`) holds its `_MetadataSignals`
+(`loaded = Signal(str, dict)`, `failed = Signal(str, str)`) the same way
+`preview.py`'s `_ImageLoader` holds `_LoadSignals` — so the signals object
+can't be garbage-collected while a queued cross-thread emit is still in
+flight (see `MediaTableModel._active_workers`'s note on this same gotcha).
+
+**Staleness guard.** `MetadataPanel._pending_filepath` is set by every
+`show_file()` call; `_on_loaded`/`_on_failed` drop a result whose filepath
+doesn't match it — covers both re-opening the dialog for a different row
+(table) and stepping to another file while the panel is open (preview)
+before a slower read has come back. `tests/test_metadata_panel.py` covers
+this and the three display states (loading / tag table / error) without a
+real exiftool call, by calling `_on_loaded`/`_on_failed` directly.
+
+**The status label and the table live in a `QStackedWidget` (`self._body`),
+not two widgets toggled with `setVisible()`.** The first version did that,
+and had only the table marked as the layout's stretchy item
+(`layout.addWidget(self._table, 1)`) — once the table was hidden, nothing
+was left to absorb the panel's extra height, and the title label and the
+status label ended up splitting it 50/50 between them instead, stranding
+"Loading…" roughly in the middle of the panel rather than right under the
+title (a real user saw exactly this). A stack always sizes to whichever
+page is current, so this can't happen — the same reason `preview.py`'s
+`_pages` already uses one for stage/video. `_status` is also explicitly
+top-aligned (`Qt.AlignLeft | Qt.AlignTop`): a `QLabel` vertically centres by
+default, which read fine in a small box but stranded the text again once
+the status page was sized to fill the same large area the table occupies.
+
 ### Hold to repeat — Move up/down buttons
 When the Move up/down toolbar buttons are held down, the move action repeats
 automatically. Behaviour:
@@ -1225,6 +1317,7 @@ metadata_load_error = Signal(str)       # exiftool could not start at all
 - `media_model.py` — MediaFile dataclass + MediaTableModel, full five-state logic with user_moved, effective_date, interpolation, apply_rename
 - `main.py` — main window, toolbar, table view, all delegates, loading overlay, selection retention on move
 - `preview.py` — the full-screen preview window: photos (async, screen-size decode, neighbour prefetch) and video, with Left/Right navigation and delete — see "Full-screen preview"
+- `metadata_panel.py` — full raw-metadata view shared by the table's Info button and the preview's Metadata side panel — see "Viewing a file's full metadata"
 - Editable New filename column, its per-file reset, and per-file manual
   date/time editing — see "Editable New filename column" and "Per-file
   date/time editing" under UI behaviour

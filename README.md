@@ -33,6 +33,7 @@ The chronological filename is the output. No vendor lock-in, no database, no sid
 - **File size** — a narrow column shows each file's size in MB
 - **Delete a file** — a trash button on each row moves that file to the Recycle Bin after you confirm
 - **Full-screen preview** — double-click a thumbnail for a big view of that photo or video (with playback controls). Left/Right step through the files in your current list order, Delete moves the file to the Recycle Bin, and closing the preview selects that file in the list. There's also an "Open in default app" button
+- **View a file's full metadata** — an info button on each row, and a "Metadata" button in the full-screen preview, show every tag the file carries
 - **Non-destructive** — nothing is written to disk until you click Rename files. (The one exception is the trash button on each row, which — after asking you to confirm — moves that file to the Recycle Bin straight away.)
 - **Video support** — first-frame thumbnails via ffmpeg, duration badges, correct iOS video timezone handling
 
@@ -151,6 +152,7 @@ MVP — actively used and tested on real event photo collections.
 - Hold-to-repeat move buttons
 - Expand/compact view toggle
 - Full-screen preview of photos and video (double-click a thumbnail)
+- View a file's full raw metadata (row Info button, or the preview's Metadata panel)
 
 **Planned:**
 - Padlock locking/unlocking per file

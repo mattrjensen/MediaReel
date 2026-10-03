@@ -27,12 +27,13 @@ from PySide6.QtWidgets import (
 
 from media_model import (
     MediaTableModel, MediaFile, HEIF_AVAILABLE,
-    COL_CHECK, COL_ORDER, COL_FILENAME, COL_DATE, COL_SIZE,
+    COL_CHECK, COL_ORDER, COL_FILENAME, COL_METADATA, COL_DATE, COL_SIZE,
     COL_PREVIEW, COL_THUMB, COL_MOVE, COL_DELETE,
     MediaFileRole, DateSourceRole,
     IsInterpolatedRole, IsReAnchoredRole, NeedsAttentionRole
 )
 from preview import PreviewWindow
+from metadata_panel import MetadataDialog
 
 # ── Size constants (mutable — updated by the expand/compact toggle) ──────────
 COMPACT_THUMB_W  = 80
@@ -505,6 +506,46 @@ class _SizeDelegate(_RowTextDelegate):
     _colour = '#6B7280'
 
 
+# ── Metadata (Info) column ────────────────────────────────────────────────────
+# An info-circle icon, drawn with primitives — not the Unicode "ⓘ" character:
+# one of exactly this kind (↻) rendered as a missing-glyph box on a real
+# machine during this app's build, which is why Reload's icon is painter-drawn
+# too. Same click-routing pattern as DeleteDelegate: MediaTableView hit-tests
+# _button_rect itself, not editorEvent, so the click doesn't also collapse
+# the row selection.
+class MetadataDelegate(BaseDelegate):
+
+    BTN_W = 28
+    BTN_H = 24
+
+    def _button_rect(self, option) -> QRect:
+        r = option.rect
+        return QRect(r.x() + (r.width() - self.BTN_W) // 2,
+                     r.y() + (r.height() - self.BTN_H) // 2,
+                     self.BTN_W, self.BTN_H)
+
+    def paint(self, painter: QPainter, option, index):
+        f: MediaFile = index.data(MediaFileRole)
+        painter.save()
+        self._draw_bg(painter, option, f)
+
+        # No button box (unlike Delete): "i" alone reads as an info icon
+        # without one, and the box around it looked like noise against the
+        # row background. _button_rect is still the click/hit-test area —
+        # just not painted — so the clickable region doesn't shrink.
+        btn = self._button_rect(option)
+        painter.setRenderHint(QPainter.Antialiasing)
+        cx, cy = btn.center().x(), btn.center().y()
+        painter.setPen(QPen(QColor('#6B7280'), 1.3))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), 7, 7)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor('#6B7280'))
+        painter.drawEllipse(QPointF(cx, cy - 3.3), 1.2, 1.2)              # dot
+        painter.drawRoundedRect(QRectF(cx - 1, cy - 1, 2, 4.5), 1, 1)     # stem
+        painter.restore()
+
+
 # ── Delete column ─────────────────────────────────────────────────────────────
 # A trash-can button, drawn with primitives like the calendar icon (a flat
 # single colour, no emoji). Clicks aren't handled here: MediaTableView routes
@@ -838,6 +879,10 @@ class MediaTableView(QTableView):
     # and rows can move in between.
     file_delete_requested = Signal(object)
 
+    # The Info button was clicked on this file's row. Also carries the
+    # MediaFile, for the same reason.
+    metadata_requested = Signal(object)
+
     def _open_date_picker(self, index, icon_rect: QRect):
         f: MediaFile = index.data(MediaFileRole)
         initial = (f.effective_date or f.date) if f else None
@@ -958,6 +1003,14 @@ class MediaTableView(QTableView):
                         # from the next event-loop turn so the modal
                         # confirmation isn't run from inside this handler.
                         QTimer.singleShot(0, lambda f=f: self.file_delete_requested.emit(f))
+                        return
+
+                if col == COL_METADATA and f is not None:
+                    delegate = self.itemDelegateForColumn(COL_METADATA)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    if delegate._button_rect(opt).contains(pos):
+                        QTimer.singleShot(0, lambda f=f: self.metadata_requested.emit(f))
                         return
 
         super().mousePressEvent(event)
@@ -1267,6 +1320,7 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(COL_CHECK,    QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_ORDER,    QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_FILENAME, QHeaderView.Interactive)
+        hh.setSectionResizeMode(COL_METADATA, QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_DATE,     QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_SIZE,     QHeaderView.Fixed)
         hh.setSectionResizeMode(COL_PREVIEW,  QHeaderView.Stretch)
@@ -1277,6 +1331,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(COL_CHECK,    32)
         self._table.setColumnWidth(COL_ORDER,    44)
         self._table.setColumnWidth(COL_FILENAME, 240)
+        self._table.setColumnWidth(COL_METADATA, 40)
         self._table.setColumnWidth(COL_DATE,     170)
         self._table.setColumnWidth(COL_SIZE,     84)    # "1234.5 MB" plus padding
         self._table.setColumnWidth(COL_THUMB,    THUMB_W + 16)
@@ -1294,9 +1349,11 @@ class MainWindow(QMainWindow):
         self._filename_delegate = _RowTextDelegate(self)
         self._size_delegate     = _SizeDelegate(self)
         self._delete_delegate   = DeleteDelegate(self)
+        self._metadata_delegate = MetadataDelegate(self)
         self._table.setItemDelegateForColumn(COL_CHECK,   self._check_delegate)
         self._table.setItemDelegateForColumn(COL_ORDER,   self._order_delegate)
         self._table.setItemDelegateForColumn(COL_FILENAME, self._filename_delegate)
+        self._table.setItemDelegateForColumn(COL_METADATA, self._metadata_delegate)
         self._table.setItemDelegateForColumn(COL_DATE,    self._date_delegate)
         self._table.setItemDelegateForColumn(COL_SIZE,    self._size_delegate)
         self._table.setItemDelegateForColumn(COL_PREVIEW, self._preview_delegate)
@@ -1347,6 +1404,7 @@ class MainWindow(QMainWindow):
             lambda row, direction: self._move(direction, row))
         self._thumb_delegate.open_file_requested.connect(self._open_preview)
         self._table.file_delete_requested.connect(self._delete_file)
+        self._table.metadata_requested.connect(self._show_metadata_dialog)
 
         self._model.folder_load_started.connect(self._on_load_started)
         self._model.folder_load_complete.connect(self._on_load_complete)
@@ -1567,6 +1625,13 @@ class MainWindow(QMainWindow):
         self._refresh_status()
         self._refresh_move_buttons()
         return True
+
+    def _show_metadata_dialog(self, f: MediaFile):
+        """The Info button on a row: every tag exiftool reports for that
+        file, read fresh (see metadata_panel.MetadataPanel for why not
+        cached). Modal — simplest, and avoids several of these piling up
+        for different rows."""
+        MetadataDialog(f.filepath, f.filename, parent=self).exec()
 
     def _open_preview(self, filepath: str):
         """Double-click on a thumbnail: the full-screen preview, starting on

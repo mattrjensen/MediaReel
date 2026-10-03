@@ -174,6 +174,24 @@ def _normalize_path(p: str) -> str:
     return os.path.normcase(os.path.normpath(p))
 
 
+def read_all_metadata(filepath: str) -> dict:
+    """Every tag exiftool reports for one file, as {'Group:Tag': value},
+    in exiftool's own natural (already sensibly grouped) order — the full
+    picture behind the handful of date/duration/size tags the rest of this
+    module actually keeps. For the metadata panel (the table's Info button
+    and the preview's Metadata panel): read fresh on demand, not cached at
+    load time alongside the other metadata — keeps a big folder's initial
+    load light, and stays correct if a file's metadata changes later (e.g.
+    after Apply rewrites it). Raises on failure (exiftool missing, file
+    unreadable) rather than falling back to anything, since there's no
+    sensible substitute for "show me everything this file has"."""
+    exiftool_path = _vendor_path('exiftool.exe')
+    with exiftool.ExifToolHelper(executable=str(exiftool_path), encoding=EXIFTOOL_ENCODING) as et:
+        tags = et.get_metadata(filepath)[0]
+    tags.pop('SourceFile', None)   # redundant — the panel already shows the filename
+    return tags
+
+
 def read_metadata(filepath: str) -> dict:
     result = _new_result(filepath)
     exiftool_path = _vendor_path('exiftool.exe')

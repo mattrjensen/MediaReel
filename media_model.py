@@ -49,18 +49,19 @@ except ImportError:
         RuntimeWarning)
 
 # ── Column indices ──────────────────────────────────────────────────────────
-COL_CHECK    = 0
-COL_ORDER    = 1
-COL_FILENAME = 2
-COL_DATE     = 3
-COL_SIZE     = 4
-COL_PREVIEW  = 5
-COL_THUMB    = 6
-COL_MOVE     = 7
-COL_DELETE   = 8
-COLUMN_COUNT = 9
+COL_CHECK     = 0
+COL_ORDER     = 1
+COL_FILENAME  = 2
+COL_METADATA  = 3
+COL_DATE      = 4
+COL_SIZE      = 5
+COL_PREVIEW   = 6
+COL_THUMB     = 7
+COL_MOVE      = 8
+COL_DELETE    = 9
+COLUMN_COUNT  = 10
 
-HEADERS = ['', '#', 'Filename', 'Date taken', 'Size',
+HEADERS = ['', '#', 'Filename', 'Info', 'Date taken', 'Size',
            'New filename (preview)', 'Preview', 'Move', 'Delete']
 
 
