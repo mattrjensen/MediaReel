@@ -12,8 +12,8 @@ from PySide6.QtCore import (
     QDate, QPersistentModelIndex, QLoggingCategory
 )
 from PySide6.QtGui import (
-    QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QImage, QPalette,
-    QFontMetrics
+    QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QImage,
+    QPalette, QFontMetrics
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -221,6 +221,29 @@ class DateDelegate(BaseDelegate):
         s = self._ICON_SIZE
         return QRect(option.rect.right() - s - 8, option.rect.center().y() - s // 2, s, s)
 
+    def _source_badge_rect(self, option, source: str) -> QRect:
+        """The source-badge pill's geometry — shared by paint() (which draws
+        it) and _warning_badge_rect() (which positions the UUID-warning
+        badge relative to it), so the two can't drift apart."""
+        small = QFont(option.font)
+        small.setPointSize(max(7, small.pointSize() - 2))
+        bw = QFontMetrics(small).horizontalAdvance(source) + 6 * 2
+        bh = self.BADGE_H
+        content_h = bh + 2 + QFontMetrics(option.font).height()
+        if self._expanded:
+            by = option.rect.y() + max(4, (option.rect.height() - content_h) // 2)
+        else:
+            by = option.rect.y() + 8
+        bx = option.rect.x() + 8
+        return QRect(bx, by, bw, bh)
+
+    def _warning_badge_rect(self, option, source: str) -> QRect:
+        """The amber '!' badge for a UUID-looking filename (see
+        MediaFile.looks_like_uuid) — right after the source badge, same row."""
+        badge = self._source_badge_rect(option, source)
+        size = self.BADGE_H
+        return QRect(badge.right() + 4, badge.top(), size, size)
+
     def _draw_calendar_icon(self, painter: QPainter, rect: QRect, color: QColor):
         """Drawn with primitives, not a text/emoji glyph, so it renders in a
         single flat colour consistent with the rest of the app's icons
@@ -253,31 +276,34 @@ class DateDelegate(BaseDelegate):
                   else f.date_source)
         bg_hex, fg_hex = SOURCE_BADGE.get(source, SOURCE_BADGE['none'])
 
+        badge = self._source_badge_rect(option, source)
+        by, bh = badge.y(), badge.height()
+
         small = painter.font()
         small.setPointSize(max(7, small.pointSize() - 2))
-        badge_fm = QFontMetrics(small)
-        pad = 6
-        bw = badge_fm.horizontalAdvance(source) + pad * 2
-        bh = self.BADGE_H
-
-        # Badge + gap + one line of date text, as a block. Top-aligned in
-        # compact mode (68px rows leave little room to spare anyway);
-        # vertically centred in expanded mode (140px rows), where top
-        # alignment left a lot of dead space below the date.
-        date_gap  = 2
-        content_h = bh + date_gap + QFontMetrics(option.font).height()
-        if self._expanded:
-            by = option.rect.y() + max(4, (option.rect.height() - content_h) // 2)
-        else:
-            by = option.rect.y() + 8
-        bx = option.rect.x() + 8
-
         painter.setFont(small)
         painter.setBrush(QColor(bg_hex))
         painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(bx, by, bw, bh, 3, 3)
+        painter.drawRoundedRect(badge, 3, 3)
         painter.setPen(QColor(fg_hex))
-        painter.drawText(bx, by, bw, bh, Qt.AlignCenter, source)
+        painter.drawText(badge, Qt.AlignCenter, source)
+
+        # UUID-filename warning — advisory only (see MediaFile.looks_like_
+        # uuid): a filled amber circle with "!", right after the source
+        # badge. Tooltip (MediaTableView.viewportEvent) carries the actual
+        # explanation; this is just the flag.
+        if f.looks_like_uuid:
+            warn = self._warning_badge_rect(option, source)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor('#F59E0B'))
+            painter.drawEllipse(warn)
+            painter.setPen(QColor('#FFFFFF'))
+            bold = QFont(small)
+            bold.setBold(True)
+            painter.setFont(bold)
+            painter.drawText(warn, Qt.AlignCenter, '!')
+
+        date_gap = 2
 
         # Date text — below badge, leaving room for the calendar icon. Shown
         # on every row, including hard anchors: the date it was renamed
@@ -1032,6 +1058,20 @@ class MediaTableView(QTableView):
                     opt.rect = self.visualRect(index)
                     if delegate._reset_icon_rect(opt).contains(pos):
                         QToolTip.showText(event.globalPos(), 'Reset', self)
+                        return True
+            if index.isValid() and model is not None and index.column() == COL_DATE:
+                f: MediaFile = index.data(MediaFileRole)
+                if f is not None and f.looks_like_uuid:
+                    delegate = self.itemDelegateForColumn(COL_DATE)
+                    opt = QStyleOptionViewItem()
+                    opt.rect = self.visualRect(index)
+                    source = 'interpolated' if (f.is_interpolated or f.is_re_anchored) else f.date_source
+                    if delegate._warning_badge_rect(opt, source).contains(pos):
+                        QToolTip.showText(
+                            event.globalPos(),
+                            "Auto-generated filename — metadata may reflect when this "
+                            "file was shared or exported, not when it was captured.",
+                            self)
                         return True
             QToolTip.hideText()
         return super().viewportEvent(event)

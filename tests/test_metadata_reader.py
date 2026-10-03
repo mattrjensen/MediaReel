@@ -164,3 +164,38 @@ class TestDateTagPriority:
         from metadata_reader import _date_from_tags
         assert _date_from_tags({'QuickTime:CreateDate': '2024:03:05 14:30:00'}) \
             == datetime(2024, 3, 5, 14, 30, 0)
+
+
+class TestIsUuidFilename:
+    def test_matches_a_bare_uuid(self):
+        from metadata_reader import is_uuid_filename
+        assert is_uuid_filename('5c4ec94a-0ccb-465f-bb89-99dde3e458a7')
+
+    def test_case_insensitive(self):
+        from metadata_reader import is_uuid_filename
+        assert is_uuid_filename('5C4EC94A-0CCB-465F-BB89-99DDE3E458A7')
+
+    def test_an_ordinary_filename_does_not_match(self):
+        from metadata_reader import is_uuid_filename
+        assert not is_uuid_filename('IMG_0001')
+        assert not is_uuid_filename('received_img_882746')
+
+    def test_wrong_segment_lengths_do_not_match(self):
+        from metadata_reader import is_uuid_filename
+        assert not is_uuid_filename('5c4ec94a-0ccb-465f-bb89-99dde3e458a')   # one short
+        assert not is_uuid_filename('5c4ec94a0ccb465fbb8999dde3e458a7')      # no hyphens
+
+    def test_new_result_sets_looks_like_uuid_from_the_stripped_stem(self):
+        from metadata_reader import _new_result
+        r = _new_result('/no/such/dir/5c4ec94a-0ccb-465f-bb89-99dde3e458a7.mp4')
+        assert r['looks_like_uuid'] is True
+        r2 = _new_result('/no/such/dir/IMG_0001.jpg')
+        assert r2['looks_like_uuid'] is False
+
+    def test_an_already_renamed_hard_anchor_with_a_uuid_stem_still_flags(self):
+        # The point: the warning survives a rename within the session,
+        # checked against the stripped stem (prefix removed), not the raw
+        # on-disk name.
+        from metadata_reader import _new_result
+        r = _new_result('/no/such/dir/20241215_184705_5c4ec94a-0ccb-465f-bb89-99dde3e458a7.mp4')
+        assert r['looks_like_uuid'] is True

@@ -41,9 +41,21 @@ FILENAME_DATE_PATTERNS = [
 
 ALREADY_FORMATTED = re.compile(r'^\d{8}_\d{6}')
 
+# e.g. 5c4ec94a-0ccb-465f-bb89-99dde3e458a7 — the names some sync/share
+# pipelines (seen on WhatsApp/iOS-shared video) substitute for the original
+# filename. Not proof the metadata is wrong, just the same kind of signal
+# as a WhatsApp/iOS share-date — worth a warning, not a block.
+UUID_FILENAME = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE)
+
 
 def is_already_formatted(filename: str) -> bool:
     return bool(ALREADY_FORMATTED.match(filename))
+
+
+def is_uuid_filename(stem: str) -> bool:
+    return bool(UUID_FILENAME.match(stem))
 
 
 def parse_date_from_filename(filename: str):
@@ -127,6 +139,7 @@ def file_size_bytes(filepath: str) -> Optional[int]:
 def _new_result(filepath: str) -> dict:
     path = Path(filepath)
     filename = path.name
+    stripped_filename = strip_date_from_filename(filename)
     return {
         'filepath': filepath,
         'filename': filename,
@@ -135,7 +148,13 @@ def _new_result(filepath: str) -> dict:
         'is_already_formatted': is_already_formatted(filename),
         'date': None,
         'date_source': DATE_SOURCE_NONE,
-        'stripped_filename': strip_date_from_filename(filename),
+        'stripped_filename': stripped_filename,
+        # Checked against the *stripped* stem, not the raw filename, so a
+        # hard anchor already renamed from a UUID name (YYYYMMDD_HHMMSS_
+        # stripped back off) still gets flagged — the point is a warning
+        # that survives the rename, not just a property of today's on-disk
+        # name. See UUID_FILENAME.
+        'looks_like_uuid': is_uuid_filename(Path(stripped_filename).stem),
         # Read here, on the worker thread, rather than when the stub rows are
         # created: a stat per file on the main thread would delay the table
         # appearing on a big or slow (network) folder.

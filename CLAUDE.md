@@ -195,6 +195,10 @@ duration_seconds: int | None   # video only
 size_bytes: int | None         # file size; None until the metadata worker has read it
                                # (shown blank meanwhile). Re-read after a rename that
                                # rewrites the file's metadata.
+looks_like_uuid: bool          # original filename (checked against the stripped stem,
+                               # so this survives a rename) is a bare UUID — advisory
+                               # warning badge only, no effect on rename logic. See
+                               # "Date taken column — source badge".
 selected: bool                 # checkbox state
 manual_filename: str | None    # user override from the editable New filename
                                # field. None = use proposed_filename; '' = skip
@@ -396,6 +400,28 @@ status instruction, not a proposed rename.
 | `interpolated` | Orange | Date derived from neighbours |
 | `none` | Red | No date found |
 | `manual` | Purple | User-entered date (calendar icon) |
+
+**UUID-filename warning badge.** A small amber circle with "!", right after
+the source badge (`DateDelegate._warning_badge_rect`, positioned off
+`_source_badge_rect` so the two can't drift apart), shown when
+`MediaFile.looks_like_uuid` is set — the file's name (its original name;
+see below) is a bare UUID like `5c4ec94a-0ccb-465f-bb89-99dde3e458a7`, the
+kind of name some sync/share pipelines (seen on WhatsApp/iOS-shared video)
+substitute for the real filename. Hovering it shows a tooltip: "Auto-
+generated filename — metadata may reflect when this file was shared or
+exported, not when it was captured" (`MediaTableView.viewportEvent`, same
+pattern as the New filename column's "Reset" tooltip). **Purely advisory —
+a nudge to double-check the date via the calendar icon, nothing more: it's
+not a `date_source`, and has no effect on the five-state rename logic.**
+
+Detected once at load (`metadata_reader.is_uuid_filename`), from the
+*stripped* stem — `stripped_filename` already has any `YYYYMMDD_HHMMSS_`
+prefix removed, so a hard anchor already renamed from a UUID name still
+gets flagged; the point is a warning that survives the rename within the
+session, not just a property of today's on-disk name. Stored as a
+persistent `MediaFile.looks_like_uuid` field (not recomputed), the same
+reason `original_index`/`manual_date_undo` are stamped once rather than
+derived live.
 
 ### Row background
 

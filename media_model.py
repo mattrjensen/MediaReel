@@ -136,6 +136,15 @@ class MediaFile:
     # metadata, since that changes the size slightly.
     size_bytes: Optional[int] = None
 
+    # True if the file's name (its *original* name — checked against the
+    # stripped stem, so this survives a rename within the session) matches
+    # a bare UUID, e.g. a WhatsApp/iOS-shared video renamed by the sharing
+    # pipeline. Purely advisory — a nudge to double-check the date via the
+    # calendar picker, not a date_source and no effect on the five-state
+    # rename logic. See metadata_reader.is_uuid_filename and the Date taken
+    # column's warning badge.
+    looks_like_uuid: bool = False
+
     # False until the thumbnail worker has finished with this file, whether
     # or not it produced an image — lets the UI tell "still loading" (pulsing
     # placeholder) apart from "no thumbnail available" (static placeholder).
@@ -1307,6 +1316,7 @@ class MediaTableModel(QAbstractTableModel):
                 date                 = meta['date'],
                 date_source          = meta['date_source'],
                 stripped_filename    = meta['stripped_filename'],
+                looks_like_uuid      = meta.get('looks_like_uuid', False),
                 duration_seconds     = meta.get('duration_seconds'),
                 size_bytes           = meta.get('size_bytes'),
                 # A thumbnail may already have arrived for this row — keep it.
